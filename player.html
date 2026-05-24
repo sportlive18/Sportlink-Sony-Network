@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Sportlink Player</title>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+
+  <style>
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+    :root {
+      --accent: #F97316;
+      --accent2: #EF4444;
+      --bg: #000;
+      --surface: rgba(10,10,14,0.96);
+      --border: rgba(255,255,255,0.10);
+      --text: #F1F5F9;
+      --muted: #64748B;
+      --live: #EF4444;
+      --green: #10B981;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+      color: var(--text);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ── FULL-SCREEN VIDEO ── */
+    #videoWrap {
+      position: fixed; inset: 0;
+      background: #000;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    video {
+      width: 100%; height: 100%;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+
+    /* ── TOP BAR — always visible ── */
+    #topBar {
+      position: fixed; top: 0; left: 0; right: 0;
+      padding: 10px 14px;
+      padding-top: calc(10px + env(safe-area-inset-top, 0px));
+      background: linear-gradient(180deg, rgba(0,0,0,0.88) 0%, transparent 100%);
+      display: flex; align-items: center; gap: 10px;
+      z-index: 300;
+    }
+
+    #backBtn {
+      width: 38px; height: 38px; border-radius: 50%;
+      background: rgba(255,255,255,0.13);
+      border: 1px solid var(--border);
+      color: var(--text); font-size: 1rem;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: background 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #backBtn:active { background: var(--accent); }
+
+    #matchTitle {
+      flex: 1;
+      font-size: 0.82rem; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+    }
+
+    #liveChip {
+      display: flex; align-items: center; gap: 5px;
+      background: rgba(239,68,68,0.22);
+      border: 1px solid rgba(239,68,68,0.45);
+      color: var(--live);
+      font-size: 0.62rem; font-weight: 800;
+      padding: 4px 10px; border-radius: 20px; flex-shrink: 0;
+    }
+    .live-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--live);
+      animation: blink 1s infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    /* ── BOTTOM CONTROLS — always visible ── */
+    #controls {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      padding: 14px 16px;
+      padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+      background: linear-gradient(0deg, rgba(0,0,0,0.92) 0%, transparent 100%);
+      z-index: 300;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+
+    /* Seek bar row */
+    #seekRow {
+      display: flex; align-items: center; gap: 10px;
+    }
+    #timeLabel {
+      font-size: 0.68rem; color: rgba(255,255,255,0.7);
+      font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0;
+    }
+    #seekBarWrap {
+      flex: 1; height: 20px; display: flex; align-items: center; cursor: pointer;
+      position: relative;
+    }
+    #seekTrack {
+      width: 100%; height: 3px; border-radius: 3px;
+      background: rgba(255,255,255,0.2); position: relative; overflow: hidden;
+    }
+    #seekBuffer {
+      position: absolute; left:0; top:0; height:100%;
+      background: rgba(255,255,255,0.35); border-radius:3px;
+      width: 0%; transition: width 0.5s linear;
+    }
+    #seekFill {
+      position: absolute; left:0; top:0; height:100%;
+      background: #EF4444; border-radius:3px; width: 0%;
+    }
+    /* For live streams, hide seek */
+    .is-live #seekRow { display: none; }
+
+    /* Buttons row */
+    #btnRow {
+      display: flex; align-items: center; gap: 4px;
+    }
+
+    .ctrl-btn {
+      width: 44px; height: 44px; border-radius: 50%;
+      background: transparent; border: none;
+      color: #fff; font-size: 1.1rem;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+    .ctrl-btn:active { background: rgba(255,255,255,0.15); }
+    .ctrl-btn.accent { color: var(--accent); }
+
+    #playPauseBtn { font-size: 1.3rem; }
+
+    /* Volume slider */
+    #volWrap {
+      display: flex; align-items: center; gap: 6px; flex: 1;
+    }
+    #volSlider {
+      flex: 1; max-width: 90px;
+      -webkit-appearance: none; appearance: none;
+      height: 3px; border-radius: 3px;
+      background: rgba(255,255,255,0.25);
+      outline: none; cursor: pointer;
+    }
+    #volSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; cursor: pointer;
+    }
+    #volSlider::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #fff; border: none; cursor: pointer;
+    }
+
+    .spacer { flex: 1; }
+
+    /* Quality badge */
+    #qualityBtn {
+      font-size: 0.65rem; font-weight: 800;
+      width: auto; padding: 0 10px; border-radius: 8px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid var(--border);
+      height: 32px;
+      letter-spacing: 0.3px;
+    }
+
+    /* Fullscreen */
+    #fsBtn { font-size: 1rem; }
+
+    /* ── LOADING OVERLAY ── */
+    #loadingOverlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      z-index: 200; transition: opacity 0.3s;
+    }
+    #loadingOverlay.hidden { opacity: 0; pointer-events: none; }
+
+    .spinner-ring {
+      width: 50px; height: 50px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #loadingText {
+      font-size: 0.8rem; color: rgba(255,255,255,0.65); font-weight: 500;
+    }
+
+    /* ── ERROR OVERLAY ── */
+    #errorOverlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.88);
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px; z-index: 210; text-align: center; padding: 24px;
+    }
+    #errorOverlay i { font-size: 2.4rem; color: var(--accent2); }
+    #errorOverlay h3 { font-size: 1rem; font-weight: 700; }
+    #errorOverlay p  { font-size: 0.78rem; color: var(--muted); max-width: 260px; line-height: 1.55; }
+
+    .err-btn {
+      padding: 10px 26px; border-radius: 30px;
+      font-size: 0.8rem; font-weight: 700;
+      cursor: pointer; border: none; transition: all 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .err-btn.primary { background: var(--accent); color: #000; }
+    .err-btn.primary:active { transform: scale(0.97); }
+    .err-btn.secondary {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid var(--border); color: var(--text);
+    }
+
+    /* ── SERVER PANEL ── */
+    #serverToggleBtn {
+      position: fixed; bottom: 90px; right: 14px;
+      width: 46px; height: 46px; border-radius: 50%;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      color: var(--accent); font-size: 1rem;
+      cursor: pointer; z-index: 300;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+      transition: all 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #serverToggleBtn:active { background: var(--accent); color: #000; }
+    .srv-count-badge {
+      position: absolute; top: -5px; right: -5px;
+      background: var(--accent2); color: #fff;
+      font-size: 0.52rem; font-weight: 800;
+      width: 18px; height: 18px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px solid #000;
+    }
+
+    #panelBackdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.55); z-index: 390;
+      opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    #panelBackdrop.open { opacity: 1; pointer-events: all; }
+
+    #serverPanel {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      border-radius: 20px 20px 0 0;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      z-index: 400;
+      transform: translateY(100%);
+      transition: transform 0.35s cubic-bezier(0.32,0.72,0,1);
+      max-height: 72vh; display: flex; flex-direction: column;
+    }
+    #serverPanel.open { transform: translateY(0); }
+
+    .panel-handle {
+      width: 36px; height: 4px; border-radius: 2px;
+      background: rgba(255,255,255,0.18);
+      margin: 12px auto 4px; flex-shrink: 0;
+    }
+    .panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 18px 12px; flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-header h3 {
+      font-size: 0.88rem; font-weight: 700;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .panel-header h3 i { color: var(--accent); font-size: 0.78rem; }
+    #closePanelBtn {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: rgba(255,255,255,0.08); border: none;
+      color: var(--muted); cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.78rem; -webkit-tap-highlight-color: transparent;
+    }
+
+    #serverList {
+      overflow-y: auto; padding: 10px 14px 16px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .srv-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 14px; border-radius: 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1.5px solid transparent;
+      cursor: pointer; transition: all 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .srv-item:active { background: rgba(255,255,255,0.1); }
+    .srv-item.active {
+      background: rgba(249,115,22,0.1);
+      border-color: rgba(249,115,22,0.4);
+    }
+    .srv-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: rgba(255,255,255,0.06);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.9rem; color: var(--muted); flex-shrink: 0;
+    }
+    .srv-item.active .srv-icon { background: rgba(249,115,22,0.15); color: var(--accent); }
+    .srv-info { flex: 1; }
+    .srv-name { font-size: 0.82rem; font-weight: 600; }
+    .srv-sub  { font-size: 0.6rem; color: var(--muted); margin-top: 2px; }
+    .srv-item.active .srv-sub { color: var(--accent); }
+    .srv-badge {
+      font-size: 0.58rem; font-weight: 700;
+      padding: 3px 8px; border-radius: 10px;
+    }
+    .srv-badge.on  { background: rgba(249,115,22,0.2); color: var(--accent); border: 1px solid rgba(249,115,22,0.3); }
+    .srv-badge.off { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
+
+    /* Quality menu */
+    #qualityMenu {
+      position: fixed; bottom: 130px; left: 50%;
+      transform: translateX(-50%) translateY(10px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px; padding: 8px;
+      z-index: 350; min-width: 140px;
+      opacity: 0; pointer-events: none;
+      transition: all 0.2s;
+    }
+    #qualityMenu.open { opacity: 1; pointer-events: all; transform: translateX(-50%) translateY(0); }
+    .q-item {
+      padding: 9px 14px; border-radius: 8px;
+      font-size: 0.78rem; font-weight: 600;
+      cursor: pointer; transition: background 0.15s;
+      display: flex; align-items: center; gap: 8px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .q-item:active, .q-item.active { background: rgba(249,115,22,0.15); color: var(--accent); }
+    .q-item i { font-size: 0.65rem; color: var(--accent); }
+  </style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div id="topBar">
+  <button id="backBtn"><i class="fas fa-arrow-left"></i></button>
+  <span id="matchTitle">Loading…</span>
+  <div id="liveChip"><span class="live-dot"></span> LIVE</div>
+</div>
+
+<!-- VIDEO -->
+<div id="videoWrap">
+  <video id="video" autoplay playsinline preload="auto"></video>
+</div>
+
+<!-- LOADING -->
+<div id="loadingOverlay">
+  <div class="spinner-ring"></div>
+  <div id="loadingText">Connecting to stream…</div>
+</div>
+
+<!-- ERROR -->
+<div id="errorOverlay">
+  <i class="fas fa-circle-exclamation"></i>
+  <h3>Stream Unavailable</h3>
+  <p id="errorMsg">This server couldn't be reached. Try switching to another server.</p>
+  <button class="err-btn primary" id="retryBtn"><i class="fas fa-rotate-right"></i> Retry</button>
+  <button class="err-btn secondary" id="tryNextBtn"><i class="fas fa-forward-step"></i> Try Next Server</button>
+</div>
+
+<!-- BOTTOM CONTROLS -->
+<div id="controls">
+  <div id="seekRow">
+    <span id="timeLabel">Live</span>
+    <div id="seekBarWrap">
+      <div id="seekTrack">
+        <div id="seekBuffer"></div>
+        <div id="seekFill"></div>
+      </div>
+    </div>
+  </div>
+  <div id="btnRow">
+    <!-- Play/Pause -->
+    <button class="ctrl-btn" id="playPauseBtn"><i class="fas fa-pause"></i></button>
+    <!-- Volume -->
+    <div id="volWrap">
+      <button class="ctrl-btn" id="muteBtn"><i class="fas fa-volume-high"></i></button>
+      <input type="range" id="volSlider" min="0" max="1" step="0.05" value="1">
+    </div>
+    <div class="spacer"></div>
+    <!-- Quality -->
+    <button class="ctrl-btn" id="qualityBtn">AUTO</button>
+    <!-- PiP -->
+    <button class="ctrl-btn" id="pipBtn" title="Picture in Picture"><i class="fas fa-clone"></i></button>
+    <!-- Fullscreen -->
+    <button class="ctrl-btn" id="fsBtn"><i class="fas fa-expand"></i></button>
+  </div>
+</div>
+
+<!-- SERVER TOGGLE -->
+<button id="serverToggleBtn" title="Switch Server">
+  <i class="fas fa-server"></i>
+  <span class="srv-count-badge" id="srvCount">0</span>
+</button>
+
+<!-- PANEL BACKDROP -->
+<div id="panelBackdrop"></div>
+
+<!-- SERVER PANEL -->
+<div id="serverPanel">
+  <div class="panel-handle"></div>
+  <div class="panel-header">
+    <h3><i class="fas fa-server"></i> Select Server</h3>
+    <button id="closePanelBtn"><i class="fas fa-xmark"></i></button>
+  </div>
+  <div id="serverList"></div>
+</div>
+
+<!-- QUALITY MENU -->
+<div id="qualityMenu"></div>
+
+<script>
+/* ════════════════════════════════════════════
+   PARAMS
+════════════════════════════════════════════ */
+const QP       = new URLSearchParams(window.location.search);
+const referer  = QP.get('ref')   || '';
+const title    = QP.get('title') || 'Live Stream';
+
+let servers = [];
+try {
+  const raw = QP.get('servers');
+  if (raw) servers = JSON.parse(decodeURIComponent(raw));
+} catch(e) {}
+
+const initUrl = QP.get('url') || '';
+if (!servers.length && initUrl) servers = [{ name: 'Server 1', url: initUrl }];
+
+let activeIndex = 0;
+let hlsInstance = null;
+let isLive = true;
+let qualityOpen = false;
+
+/* ════════════════════════════════════════════
+   DOM REFS
+════════════════════════════════════════════ */
+const video          = document.getElementById('video');
+const loadingOverlay = document.getElementById('loadingOverlay');
+const loadingText    = document.getElementById('loadingText');
+const errorOverlay   = document.getElementById('errorOverlay');
+const errorMsg       = document.getElementById('errorMsg');
+const matchTitleEl   = document.getElementById('matchTitle');
+const playPauseBtn   = document.getElementById('playPauseBtn');
+const muteBtn        = document.getElementById('muteBtn');
+const volSlider      = document.getElementById('volSlider');
+const seekFill       = document.getElementById('seekFill');
+const seekBuffer     = document.getElementById('seekBuffer');
+const timeLabel      = document.getElementById('timeLabel');
+const qualityBtn     = document.getElementById('qualityBtn');
+const qualityMenu    = document.getElementById('qualityMenu');
+const fsBtn          = document.getElementById('fsBtn');
+const pipBtn         = document.getElementById('pipBtn');
+const serverToggle   = document.getElementById('serverToggleBtn');
+const serverPanel    = document.getElementById('serverPanel');
+const panelBackdrop  = document.getElementById('panelBackdrop');
+const serverListEl   = document.getElementById('serverList');
+const srvCountEl     = document.getElementById('srvCount');
+const liveChip       = document.getElementById('liveChip');
+
+/* ════════════════════════════════════════════
+   TITLE
+════════════════════════════════════════════ */
+matchTitleEl.textContent = title;
+document.title = title + ' — Sportlink TV';
+
+/* ════════════════════════════════════════════
+   SERVER COUNT BADGE
+════════════════════════════════════════════ */
+srvCountEl.textContent = servers.length;
+if (servers.length <= 1) serverToggle.style.display = 'none';
+
+/* ════════════════════════════════════════════
+   LOADING / ERROR UI
+════════════════════════════════════════════ */
+function showLoading(msg) {
+  loadingText.textContent = msg || 'Connecting to stream…';
+  loadingOverlay.classList.remove('hidden');
+  errorOverlay.style.display = 'none';
+}
+function hideLoading() {
+  loadingOverlay.classList.add('hidden');
+}
+function showError(msg) {
+  hideLoading();
+  errorMsg.textContent = msg || 'Stream unavailable. Try another server.';
+  errorOverlay.style.display = 'flex';
+}
+
+/* ════════════════════════════════════════════
+   HLS.JS LOADER
+════════════════════════════════════════════ */
+async function loadStream(url, index) {
+  if (!url) { showError('No URL for this server.'); return; }
+  activeIndex = index;
+  buildServerList();
+  showLoading('Connecting to ' + (servers[index]?.name || 'Server ' + (index + 1)) + '…');
+  buildQualityMenu([]);
+  qualityBtn.textContent = 'AUTO';
+
+  // Destroy previous instance
+  if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+  video.removeAttribute('src'); video.load();
+
+  // Detect if stream is iframe URL (not m3u8)
+  const isIframe = !url.endsWith('.m3u8') && !url.includes('.m3u8') && !url.includes('playlist');
+
+  if (isIframe) {
+    // Fallback: open in fullscreen iframe overlay
+    openIframe(url, title);
+    hideLoading();
+    return;
+  }
+
+  if (Hls.isSupported()) {
+    const hls = new Hls({
+      maxBufferLength: 30,
+      liveSyncDurationCount: 3,
+      enableWorker: true,
+      xhrSetup: (xhr) => {
+        if (referer) {
+          try { xhr.setRequestHeader('Referer', referer); } catch(e) {}
+        }
+      }
+    });
+    hlsInstance = hls;
+    hls.loadSource(url);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+      isLive = hls.levels.length > 0;
+      // Check if it's actually live
+      const lvl = hls.levels[hls.currentLevel];
+      isLive = true; // Most sport streams are live
+      liveChip.style.display = 'flex';
+      document.getElementById('controls').classList.add('is-live');
+      buildQualityMenu(hls.levels);
+      hideLoading();
+      attemptPlay();
+    });
+
+    hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+      const lvl = hls.levels[data.level];
+      if (lvl) qualityBtn.textContent = lvl.height ? lvl.height + 'p' : 'AUTO';
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hls.startLoad();
+          setTimeout(() => {
+            if (data.fatal) showError('Network error — stream may have expired. Try another server.');
+          }, 5000);
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        } else {
+          showError('Stream error. Try another server.');
+        }
+      }
+    });
+
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari native HLS
+    video.src = url;
+    video.addEventListener('loadedmetadata', () => { hideLoading(); attemptPlay(); }, { once: true });
+    video.addEventListener('error', () => showError('Could not load stream.'), { once: true });
+  } else {
+    showError('Your browser does not support HLS streaming.');
+  }
+}
+
+function openIframe(url, iTitle) {
+  // Create a temporary fullscreen iframe overlay
+  const existing = document.getElementById('iframeOverlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'iframeOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:250;background:#000;';
+  overlay.innerHTML = '<iframe src="' + escHtml(url) + '" style="width:100%;height:100%;border:none;" allowfullscreen allow="autoplay;fullscreen;encrypted-media;picture-in-picture"></iframe>';
+  document.body.appendChild(overlay);
+  hideLoading();
+  // Hide video controls since it's iframe
+  document.getElementById('controls').style.display = 'none';
+}
+
+async function attemptPlay() {
+  try { await video.play(); }
+  catch { video.muted = true; try { await video.play(); } catch {} }
+}
+
+/* ════════════════════════════════════════════
+   VIDEO EVENTS → control state
+════════════════════════════════════════════ */
+video.addEventListener('waiting', () => showLoading('Buffering…'));
+video.addEventListener('playing', () => { hideLoading(); updatePlayBtn(); });
+video.addEventListener('pause',   () => updatePlayBtn());
+video.addEventListener('canplay', () => hideLoading());
+video.addEventListener('volumechange', () => updateVolumeUI());
+video.addEventListener('timeupdate', () => updateSeek());
+video.addEventListener('progress',   () => updateBuffer());
+
+function updatePlayBtn() {
+  playPauseBtn.innerHTML = video.paused
+    ? '<i class="fas fa-play"></i>'
+    : '<i class="fas fa-pause"></i>';
+}
+function updateVolumeUI() {
+  const muted = video.muted || video.volume === 0;
+  muteBtn.innerHTML = muted
+    ? '<i class="fas fa-volume-xmark"></i>'
+    : video.volume < 0.5
+      ? '<i class="fas fa-volume-low"></i>'
+      : '<i class="fas fa-volume-high"></i>';
+  volSlider.value = muted ? 0 : video.volume;
+}
+function updateSeek() {
+  if (!video.duration || isLive) return;
+  const pct = (video.currentTime / video.duration) * 100;
+  seekFill.style.width = pct + '%';
+  const cur = fmt(video.currentTime);
+  const dur = fmt(video.duration);
+  timeLabel.textContent = cur + ' / ' + dur;
+}
+function updateBuffer() {
+  if (!video.duration) return;
+  try {
+    const buf = video.buffered;
+    if (buf.length) {
+      const pct = (buf.end(buf.length - 1) / video.duration) * 100;
+      seekBuffer.style.width = pct + '%';
+    }
+  } catch(e) {}
+}
+function fmt(s) {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return h > 0
+    ? h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0')
+    : m + ':' + String(sec).padStart(2,'0');
+}
+
+/* ════════════════════════════════════════════
+   CONTROLS — PLAY/PAUSE
+════════════════════════════════════════════ */
+playPauseBtn.addEventListener('click', () => {
+  if (video.paused) video.play().catch(() => {});
+  else video.pause();
+});
+
+/* ════════════════════════════════════════════
+   CONTROLS — VOLUME
+════════════════════════════════════════════ */
+muteBtn.addEventListener('click', () => {
+  video.muted = !video.muted;
+  if (!video.muted && video.volume === 0) video.volume = 0.5;
+});
+volSlider.addEventListener('input', () => {
+  video.volume = parseFloat(volSlider.value);
+  video.muted = video.volume === 0;
+});
+
+/* ════════════════════════════════════════════
+   CONTROLS — SEEK (VOD only)
+════════════════════════════════════════════ */
+document.getElementById('seekBarWrap').addEventListener('click', (e) => {
+  if (isLive || !video.duration) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const pct  = (e.clientX - rect.left) / rect.width;
+  video.currentTime = pct * video.duration;
+});
+
+/* ════════════════════════════════════════════
+   CONTROLS — QUALITY
+════════════════════════════════════════════ */
+function buildQualityMenu(levels) {
+  qualityMenu.innerHTML = '';
+  if (!levels || !levels.length) return;
+
+  const autoItem = document.createElement('div');
+  autoItem.className = 'q-item active';
+  autoItem.innerHTML = '<i class="fas fa-circle-check"></i> Auto';
+  autoItem.addEventListener('click', () => {
+    if (hlsInstance) hlsInstance.currentLevel = -1;
+    qualityBtn.textContent = 'AUTO';
+    document.querySelectorAll('.q-item').forEach(i => i.classList.remove('active'));
+    autoItem.classList.add('active');
+    closeQuality();
+  });
+  qualityMenu.appendChild(autoItem);
+
+  levels.forEach((lvl, i) => {
+    const label = lvl.height ? lvl.height + 'p' : 'Level ' + i;
+    const item = document.createElement('div');
+    item.className = 'q-item';
+    item.innerHTML = '<i class="fas fa-circle-check" style="opacity:0"></i> ' + escHtml(label);
+    item.addEventListener('click', () => {
+      if (hlsInstance) hlsInstance.currentLevel = i;
+      qualityBtn.textContent = label;
+      document.querySelectorAll('.q-item').forEach(qi => {
+        qi.classList.remove('active');
+        qi.querySelector('i').style.opacity = '0';
+      });
+      item.classList.add('active');
+      item.querySelector('i').style.opacity = '1';
+      closeQuality();
+    });
+    qualityMenu.appendChild(item);
+  });
+}
+
+qualityBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  qualityOpen = !qualityOpen;
+  qualityMenu.classList.toggle('open', qualityOpen);
+});
+function closeQuality() { qualityOpen = false; qualityMenu.classList.remove('open'); }
+document.addEventListener('click', () => closeQuality());
+
+/* ════════════════════════════════════════════
+   CONTROLS — PICTURE IN PICTURE
+════════════════════════════════════════════ */
+pipBtn.addEventListener('click', async () => {
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await video.requestPictureInPicture();
+  } catch(e) { pipBtn.style.display = 'none'; }
+});
+if (!document.pictureInPictureEnabled) pipBtn.style.display = 'none';
+
+/* ════════════════════════════════════════════
+   CONTROLS — FULLSCREEN
+════════════════════════════════════════════ */
+fsBtn.addEventListener('click', () => {
+  const el = document.documentElement;
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
+  }
+});
+document.addEventListener('fullscreenchange', updateFsBtn);
+document.addEventListener('webkitfullscreenchange', updateFsBtn);
+function updateFsBtn() {
+  const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  fsBtn.innerHTML = inFs ? '<i class="fas fa-compress"></i>' : '<i class="fas fa-expand"></i>';
+}
+
+/* ════════════════════════════════════════════
+   BACK BUTTON
+════════════════════════════════════════════ */
+document.getElementById('backBtn').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  if (window.history.length > 1) window.history.back();
+  else window.close();
+});
+
+/* ════════════════════════════════════════════
+   SERVER PANEL
+════════════════════════════════════════════ */
+function buildServerList() {
+  serverListEl.innerHTML = '';
+  servers.forEach((srv, i) => {
+    const item = document.createElement('div');
+    item.className = 'srv-item' + (i === activeIndex ? ' active' : '');
+    item.innerHTML = `
+      <div class="srv-icon"><i class="fas fa-${i === activeIndex ? 'play-circle' : 'server'}"></i></div>
+      <div class="srv-info">
+        <div class="srv-name">${escHtml(srv.name || ('Server ' + (i+1)))}</div>
+        <div class="srv-sub">${i === activeIndex ? 'Now Playing' : 'Available'}</div>
+      </div>
+      <span class="srv-badge ${i === activeIndex ? 'on' : 'off'}">${i === activeIndex ? '▶ Playing' : 'Switch'}</span>
+    `;
+    item.addEventListener('click', () => {
+      if (i !== activeIndex) loadStream(servers[i].url, i);
+      closePanel();
+    });
+    serverListEl.appendChild(item);
+  });
+}
+function openPanel()  { serverPanel.classList.add('open');  panelBackdrop.classList.add('open'); }
+function closePanel() { serverPanel.classList.remove('open'); panelBackdrop.classList.remove('open'); }
+serverToggle.addEventListener('click', () => serverPanel.classList.contains('open') ? closePanel() : openPanel());
+document.getElementById('closePanelBtn').addEventListener('click', closePanel);
+panelBackdrop.addEventListener('click', closePanel);
+
+/* ════════════════════════════════════════════
+   ERROR BUTTONS
+════════════════════════════════════════════ */
+document.getElementById('retryBtn').addEventListener('click', () => {
+  errorOverlay.style.display = 'none';
+  loadStream(servers[activeIndex]?.url, activeIndex);
+});
+document.getElementById('tryNextBtn').addEventListener('click', () => {
+  const next = (activeIndex + 1) % servers.length;
+  errorOverlay.style.display = 'none';
+  loadStream(servers[next].url, next);
+});
+
+/* ════════════════════════════════════════════
+   HELPERS
+════════════════════════════════════════════ */
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+/* ════════════════════════════════════════════
+   BOOT
+════════════════════════════════════════════ */
+buildServerList();
+if (servers.length) {
+  loadStream(servers[0].url, 0);
+} else {
+  showError('No stream URLs provided.');
+}
+</script>
+</body>
+</html>
