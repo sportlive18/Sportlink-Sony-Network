@@ -126,9 +126,9 @@
 (function(){
   // ── CONFIG ─────────────────────────────────────────────────────────────
   const M3U_URL = 'https://raw.githubusercontent.com/sportlive18/Sky-F1/refs/heads/main/jtv.m3u';
-  const REFRESH_MS = 7 * 60 * 1000;
-  const MAX_RETRY = 3;
-  const LOAD_TIMEOUT_MS = 20000;
+  const REFRESH_MS = 3 * 60 * 1000; // Refresh every 3 minutes
+  const MAX_RETRY = 5;
+  const LOAD_TIMEOUT_MS = 30000;
   const UA = 'plaYtv/7.1.5 (Linux;Android 13) ExoPlayerLib/2.11.6';
   const COOKIE_JSON_URL = 'https://allinonereborn2.online/jstrweb2/cookies.json';
   const STAR_COOKIE_URL = 'https://allinonereborn2.online/jtv-fetch/jstarcookie/cookie.json';
@@ -167,6 +167,7 @@
   let isLoading = false;
   let cookieMap = {};
   let starCookieMap = {};
+  let currentChannel = null;
 
   function getParam(k){ return new URLSearchParams(location.search).get(k); }
 
@@ -192,10 +193,12 @@
       if (cookiesRes.ok) {
         const data = await cookiesRes.json();
         if (data && typeof data === 'object') cookieMap = data;
+        console.log('Cookies loaded:', Object.keys(cookieMap).length, 'entries');
       }
       if (starRes.ok) {
         const data = await starRes.json();
         if (data && typeof data === 'object') starCookieMap = data;
+        console.log('Star cookies loaded:', Object.keys(starCookieMap).length, 'entries');
       }
     } catch (e) {
       console.warn('Cookie fetch failed:', e);
@@ -229,7 +232,7 @@
         const pipe = raw.indexOf('|');
         const url = pipe !== -1 ? raw.substring(0, pipe) : raw;
         ch.streamUrl = url;
-        ch.isHLS = url.includes('.m3u8');
+        ch.isHLS = url.includes('.m3u8') || url.includes('.m3u');
         if(pipe !== -1){
           raw.substring(pipe+1).split('&').forEach(p=>{
             const eq=p.indexOf('='); if(eq===-1) return;
@@ -242,6 +245,7 @@
       }
       if(ch.streamUrl) channels.push(ch);
     }
+    console.log('Parsed', channels.length, 'channels');
     return channels;
   }
 
@@ -251,29 +255,53 @@
     const nameLower = ch.name.toLowerCase();
     const idLower = ch.id.toLowerCase();
     let matched = null;
+    let matchedKey = null;
     
+    // Try star cookie map first
     for (const [key, val] of Object.entries(starCookieMap)) {
-      if (nameLower.includes(key.toLowerCase()) || idLower.includes(key.toLowerCase())) {
-        if (val && val.cookie) { matched = val.cookie; break; }
-      }
-    }
-    if (!matched) {
-      for (const [key, val] of Object.entries(cookieMap)) {
-        if (nameLower.includes(key.toLowerCase()) || idLower.includes(key.toLowerCase())) {
-          if (val && val.cookie) { matched = val.cookie; break; }
+      if (val && val.cookie) {
+        const keyLower = key.toLowerCase();
+        if (nameLower.includes(keyLower) || idLower.includes(keyLower) || keyLower.includes(nameLower)) {
+          matched = val.cookie;
+          matchedKey = key;
+          break;
         }
       }
     }
-    if (matched) ch.cookie = matched;
+    
+    // If not found, try regular cookie map
+    if (!matched) {
+      for (const [key, val] of Object.entries(cookieMap)) {
+        if (val && val.cookie) {
+          const keyLower = key.toLowerCase();
+          if (nameLower.includes(keyLower) || idLower.includes(keyLower) || keyLower.includes(nameLower)) {
+            matched = val.cookie;
+            matchedKey = key;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (matched) {
+      ch.cookie = matched;
+      console.log('Applied cookie for', ch.name, 'from key:', matchedKey);
+    } else {
+      console.log('No cookie match for:', ch.name);
+    }
     return ch;
   }
 
   // ── Fetch M3U ──
   async function fetchData(){
-    const r = await fetch(M3U_URL + '?_=' + Date.now(), { cache: 'no-store' });
+    const url = M3U_URL + '?_=' + Date.now();
+    console.log('Fetching M3U:', url);
+    const r = await fetch(url, { cache: 'no-store' });
     if(!r.ok) throw new Error('HTTP ' + r.status);
-    allChannels = parseM3U(await r.text());
+    const text = await r.text();
+    allChannels = parseM3U(text);
     allChannels.forEach(ch => applyCookieFromJson(ch));
+    console.log('Total channels with cookies:', allChannels.filter(c => c.cookie).length);
   }
 
   // ── ClearKey DRM ──
@@ -285,21 +313,35 @@
 
   // ── Request filter ──
   function applyFilter(ch){
-    if (!player || !player.getNetworkingEngine) return;
+    if (!player || !player.getNetworkingEngine) {
+      console.warn('Player not ready for filter');
+      return;
+    }
+    console.log('Applying filter for:', ch.name, 'Cookie:', ch.cookie ? 'Present' : 'None');
+    
     player.getNetworkingEngine().clearAllRequestFilters();
-    player.getNetworkingEngine().registerRequestFilter((type, req)=>{
+    player.getNetworkingEngine().registerRequestFilter((type, req) => {
+      // Always set these headers
       req.headers['Referer'] = 'https://www.jiotv.com/';
       req.headers['User-Agent'] = ch.ua || UA;
-      if(ch.cookie){
+      req.headers['Origin'] = 'https://www.jiotv.com';
+      
+      if(ch.cookie) {
         req.headers['Cookie'] = ch.cookie;
+        
+        // Extract token for URL parameter
         const rawCookie = ch.cookie;
-        let token = rawCookie.startsWith('__hdnea__=')
-          ? rawCookie.substring(10)
-          : rawCookie;
+        let token = rawCookie;
+        if (rawCookie.startsWith('__hdnea__=')) {
+          token = rawCookie.substring(10);
+        }
+        
+        // Add token to manifest and segment requests
         const isMpdOrSeg = type === shaka.net.NetworkingEngine.RequestType.MANIFEST ||
                           type === shaka.net.NetworkingEngine.RequestType.SEGMENT;
-        if(isMpdOrSeg && !req.uris[0].includes('__hdnea__')){
-          req.uris[0] += (req.uris[0].includes('?') ? '&' : '?') + '__hdnea__=' + token;
+        if(isMpdOrSeg && !req.uris[0].includes('__hdnea__')) {
+          const separator = req.uris[0].includes('?') ? '&' : '?';
+          req.uris[0] += separator + '__hdnea__=' + token;
         }
       }
     });
@@ -308,15 +350,21 @@
   // ── Background refresh ──
   function scheduleRefresh(){
     clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(async() => {
+    refreshTimer = setTimeout(async () => {
       try {
+        console.log('Refreshing playlist and cookies...');
+        await fetchCookies();
         await fetchData();
-        const ch = allChannels.find(c => String(c.id) === String(currentId));
-        if(ch && !$('video').paused) {
-          applyCookieFromJson(ch);
-          applyFilter(ch);
+        if (currentChannel) {
+          const updated = allChannels.find(c => String(c.id) === String(currentId));
+          if (updated) {
+            currentChannel = updated;
+            applyCookieFromJson(currentChannel);
+            applyFilter(currentChannel);
+            console.log('Refreshed channel:', currentChannel.name);
+          }
         }
-      } catch(e) { console.warn('[refresh]', e); }
+      } catch(e) { console.warn('[refresh error]', e); }
       scheduleRefresh();
     }, REFRESH_MS);
   }
@@ -338,12 +386,27 @@
       setLabel('Connecting to stream…');
     }
     
-    try { await fetchData(); } catch(e) { console.warn('[m3u]', e); }
+    try { 
+      await fetchData(); 
+    } catch(e) { 
+      console.warn('[m3u fetch error]', e); 
+      if (!isRetry) {
+        // Try once more with fresh cookies
+        await fetchCookies();
+        await fetchData();
+      }
+    }
     
     const ch = allChannels.find(c => String(c.id) === String(id));
-    if(!ch){ showError('Not Found', 'Channel not available.'); isLoading = false; return; }
+    if(!ch){ 
+      showError('Not Found', 'Channel not available.'); 
+      isLoading = false; 
+      return; 
+    }
     
     currentId = id;
+    currentChannel = ch;
+    
     document.title = ch.name + ' | Sportlink';
     $('ch-name').textContent = ch.name;
     const logo = $('ch-logo');
@@ -351,13 +414,39 @@
     else logo.style.display = 'none';
 
     applyCookieFromJson(ch);
+    console.log('Loading channel:', ch.name, 'Stream URL:', ch.streamUrl);
 
-    try { await player.unload(); } catch(e) {}
+    try { 
+      await player.unload(); 
+    } catch(e) {}
     
     applyFilter(ch);
+    
+    // Configure player
     player.configure({
-      manifest: { defaultPresentationDelay: 5 },
-      streaming: { lowLatencyMode: true, bufferingGoal: 10, rebufferingGoal: 2, safeSeekOffset: 5 }
+      manifest: { 
+        defaultPresentationDelay: 5,
+        retryParameters: {
+          timeout: 10000,
+          maxAttempts: 3
+        }
+      },
+      streaming: { 
+        lowLatencyMode: true, 
+        bufferingGoal: 10, 
+        rebufferingGoal: 2, 
+        safeSeekOffset: 5,
+        retryParameters: {
+          timeout: 10000,
+          maxAttempts: 3
+        }
+      },
+      drm: {
+        retryParameters: {
+          timeout: 10000,
+          maxAttempts: 3
+        }
+      }
     });
     
     if(!ch.isHLS){
@@ -366,27 +455,37 @@
     }
     
     try {
+      console.log('Attempting to load:', ch.streamUrl);
       await loadWithTimeout(ch.streamUrl);
-      $('video').play().catch(() => {});
+      await $('video').play().catch(() => {});
+      console.log('Stream playing successfully!');
       retryCount = 0;
       isLoading = false;
       hideLoader();
       scheduleRefresh();
     } catch(err) {
-      console.error('[load] attempt', retryCount+1, 'error:', err.message || err);
+      console.error('[load error]', err);
       if(retryCount < MAX_RETRY) {
         retryCount++;
         setLabel('Retry ' + retryCount + '/' + MAX_RETRY + ' — reconnecting…');
-        setTimeout(() => loadChannel(id, true), 2500);
+        // Wait and retry with fresh data
+        await fetchCookies();
+        setTimeout(() => loadChannel(id, true), 2000);
       } else {
         isLoading = false;
-        showError('Stream Error', 'Unable to play this channel.<br><br>The stream token may have expired — try refreshing to get a fresh playlist.');
+        showError(
+          'Stream Error', 
+          'Unable to play this channel.<br><br>' +
+          'The stream may require authentication or has expired.<br>' +
+          'Error: ' + (err.message || err)
+        );
       }
     }
   }
 
   // ── Boot ──
   document.addEventListener('DOMContentLoaded', async () => {
+    console.log('Initializing player...');
     await fetchCookies();
 
     shaka.polyfill.installAll();
@@ -402,7 +501,8 @@
     await player.attach(video);
     
     player.addEventListener('error', ev => {
-      console.error('[Shaka error]', ev.detail.code, ev.detail);
+      console.error('[Shaka error]', ev.detail);
+      // Don't show error overlay here, let loadChannel handle retry
     });
 
     const ui = new shaka.ui.Overlay(player, container, video);
@@ -427,10 +527,8 @@
       return;
     }
 
-    // Try to get channel from URL param or query string
+    // Get channel ID from URL
     let reqId = getParam('id');
-    
-    // If no id param, try to get from the data param (from main page)
     if (!reqId) {
       const dataParam = getParam('data');
       if (dataParam) {
@@ -444,7 +542,6 @@
       }
     }
 
-    // If still no id, use first channel
     if (!reqId) {
       reqId = allChannels[0].id;
     }
