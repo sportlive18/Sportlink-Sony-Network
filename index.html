@@ -356,9 +356,10 @@
           const category = getChannelCategory(ch.name);
           const card = document.createElement('a');
           card.className = 'card';
-          // Use the id from JSON for the player link, or fallback to name
+          // Use the id from JSON for the player link
           const channelId = ch.id || ch.name.replace(/\s+/g, '-').toLowerCase();
-          card.href = `player.html?id=${channelId}`;
+          // IMPORTANT: Link to player.html with the channel ID
+          card.href = `player.html?id=${encodeURIComponent(channelId)}`;
           card.dataset.lang = category; // store category for filtering
 
           // logo fallback
