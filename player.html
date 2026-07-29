@@ -9,6 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.16.2/dist/shaka-player.ui.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shaka-player@4.16.2/dist/controls.css"/>
 <style>
+/* --- Your existing styles (unchanged) --- */
 :root{
   --bg:#060810;
   --surface:#0d1018;
@@ -21,7 +22,6 @@
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;overflow:hidden}
 
-/* HEADER BAR */
 #top-bar{
   position:fixed;top:0;left:0;right:0;z-index:200;
   height:52px;
@@ -51,7 +51,6 @@ html,body{width:100%;height:100%;background:var(--bg);color:var(--text);font-fam
 }
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 
-/* PLAYER CONTAINER */
 .shaka-video-container{
   position:fixed;inset:0;
   background:#000;
@@ -59,7 +58,6 @@ html,body{width:100%;height:100%;background:var(--bg);color:var(--text);font-fam
 }
 video{width:100%;height:100%;object-fit:contain;background:#000}
 
-/* LOADING STATE */
 #state-overlay{
   position:fixed;inset:0;z-index:500;
   display:flex;flex-direction:column;
@@ -77,7 +75,6 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 #state-msg{font-size:14px;color:var(--muted);letter-spacing:0.5px}
 #state-overlay.hidden{display:none}
 
-/* ERROR / BLOCK OVERLAY */
 .block-overlay{
   position:fixed;inset:0;z-index:99999;
   display:flex;align-items:center;justify-content:center;
@@ -96,7 +93,6 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 .block-sub{font-size:13px;color:var(--muted);line-height:1.7}
 .block-sub a{color:var(--accent);text-decoration:none}
 
-/* Shaka overrides */
 .shaka-controls-container{background:transparent !important}
 </style>
 </head>
@@ -124,7 +120,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 <script>
 (function(){
 
-  /* ─── Sandbox guard ─── */
+  /* ─── Sandbox guard (unchanged) ─── */
   function isSandboxed(){
     try{
       if(window.self===window.top) return false;
@@ -148,7 +144,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
   }
 
   /* ─── Constants ─── */
-  const JSON_URL = 'https://binge-giotv.pages.dev/data/id.json';
+  const JSON_URL = 'https://sayan-sportlink-sonynetwork.pages.dev/sonyliv.json';
 
   /* ─── State ─── */
   let player = null;
@@ -169,6 +165,35 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
   function showOverlay(){ overlay.classList.remove('hidden'); }
   function hideOverlay(){ overlay.classList.add('hidden'); }
 
+  /* ─── NEW: Fetch cookie from cookies.json URL ─── */
+  async function fetchCookie(cookieUrl) {
+    if (!cookieUrl) return null;
+    try {
+      const res = await fetch(cookieUrl, {
+        headers: {
+          'Referer': 'https://www.jiotv.com/',
+          'User-Agent': 'plaYtv/7.1.5 (Linux;Android 13) ExoPlayerLib/2.11.6'
+        }
+      });
+      if (!res.ok) throw new Error('Failed to fetch cookie');
+      const data = await res.json();
+      // The cookie might be in different formats. Try to extract the actual cookie string.
+      if (typeof data === 'string') return data;
+      if (data.cookie) return data.cookie;
+      if (data.__hdnea__) return '__hdnea__=' + data.__hdnea__;
+      // If it's a key-value object, try to stringify it.
+      if (typeof data === 'object' && data !== null) {
+        const entries = Object.entries(data);
+        if (entries.length === 1) return entries[0][0] + '=' + entries[0][1];
+        return Object.entries(data).map(([k,v]) => k + '=' + v).join('; ');
+      }
+      return null;
+    } catch (e) {
+      console.warn('Cookie fetch error:', e);
+      return null;
+    }
+  }
+
   /* ─── Load & play a channel ─── */
   async function loadChannel(id){
     const ch = allChannels.find(c => c.id === id);
@@ -179,7 +204,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 
     // Update HUD
     chName.textContent = ch.name;
-    chLogo.src = ch.logo;
+    chLogo.src = ch.logo || '';
     document.title = ch.name + ' · Star Sports Live';
 
     showOverlay();
@@ -187,47 +212,82 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 
     try{
       await player.unload();
-    }catch(e){}
+    } catch(e) {}
 
-    // Extract bare cookie value
-    let cookieValue = ch.cookie || '';
-    let urlCookie = cookieValue.startsWith('__hdnea__=') ? cookieValue.substring(10) : cookieValue;
+    // --- STEP 1: Fetch cookie from URL ---
+    let cookieValue = null;
+    if (ch.cookies) {
+      setMsg('Fetching stream token…');
+      cookieValue = await fetchCookie(ch.cookies);
+      if (!cookieValue) {
+        // Fallback: try using the cookie field directly if it exists
+        if (ch.cookie) cookieValue = ch.cookie;
+      }
+    } else if (ch.cookie) {
+      cookieValue = ch.cookie;
+    }
 
-    // Register network filter
+    // --- STEP 2: Configure player ---
     player.getNetworkingEngine().clearAllRequestFilters();
-    if(cookieValue){
+
+    // Register request filter with the fetched cookie
+    if (cookieValue) {
+      // For cookie header, we need to set it exactly.
+      // Remove any leading/trailing whitespace and ensure it's a valid cookie string.
+      const cleanCookie = cookieValue.trim();
       player.getNetworkingEngine().registerRequestFilter((type, req) => {
         req.headers['Referer'] = 'https://www.jiotv.com/';
         req.headers['User-Agent'] = 'plaYtv/7.1.5 (Linux;Android 13) ExoPlayerLib/2.11.6';
-        req.headers['Cookie'] = cookieValue;
-        if(
-          (type===shaka.net.NetworkingEngine.RequestType.MANIFEST ||
-           type===shaka.net.NetworkingEngine.RequestType.SEGMENT) &&
-          !req.uris[0].includes('__hdnea__')
-        ){
-          const sep = req.uris[0].includes('?') ? '&' : '?';
-          req.uris[0] += sep + '__hdnea__=' + urlCookie;
+        req.headers['Cookie'] = cleanCookie;
+        // Also append __hdnea__ to URL if it's a manifest or segment request
+        const isManifestOrSegment = (type === shaka.net.NetworkingEngine.RequestType.MANIFEST ||
+                                     type === shaka.net.NetworkingEngine.RequestType.SEGMENT);
+        if (isManifestOrSegment && !req.uris[0].includes('__hdnea__')) {
+          // Try to extract just the __hdnea__ value if it's in the cookie
+          let hdneaValue = '';
+          if (cleanCookie.includes('__hdnea__=')) {
+            const match = cleanCookie.match(/__hdnea__=([^;]+)/);
+            if (match) hdneaValue = match[1];
+          } else if (cleanCookie.startsWith('__hdnea__=')) {
+            hdneaValue = cleanCookie.substring(10);
+          }
+          if (hdneaValue) {
+            const sep = req.uris[0].includes('?') ? '&' : '?';
+            req.uris[0] += sep + '__hdnea__=' + hdneaValue;
+          }
         }
+      });
+    } else {
+      // No cookie - still add referer
+      player.getNetworkingEngine().registerRequestFilter((type, req) => {
+        req.headers['Referer'] = 'https://www.jiotv.com/';
+        req.headers['User-Agent'] = 'plaYtv/7.1.5 (Linux;Android 13) ExoPlayerLib/2.11.6';
       });
     }
 
-    // Configure DRM
+    // --- STEP 3: Configure DRM ---
+    const drmConfig = {};
+    if (ch.keyId && ch.key) {
+      drmConfig.clearKeys = { [ch.keyId]: ch.key };
+    }
     player.configure({
-      drm:{ clearKeys:{ [ch.keyId]: ch.key } },
-      manifest:{ defaultPresentationDelay:5 },
-      streaming:{
-        lowLatencyMode:true,
-        bufferingGoal:10,
-        rebufferingGoal:2,
-        safeSeekOffset:5
+      drm: drmConfig,
+      manifest: { defaultPresentationDelay: 5 },
+      streaming: {
+        lowLatencyMode: true,
+        bufferingGoal: 10,
+        rebufferingGoal: 2,
+        safeSeekOffset: 5
       }
     });
 
     try{
-      await player.load(ch.url);
-      video.play().catch(()=>{});
+      setMsg('Starting stream…');
+      await player.load(ch.streamUrl || ch.url);
+      video.play().catch(() => {});
       hideOverlay();
-    }catch(e){
+    } catch(e){
+      console.error('Playback error:', e);
       showBlock('Playback Error', 'Stream unavailable right now.<br><a href="index.html">← Back to channels</a>');
     }
   }
@@ -245,9 +305,9 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 
     const ui = new shaka.ui.Overlay(player, container, video);
     ui.configure({
-      addBigPlayButton:true,
-      controlPanelElements:['mute','play_pause','time_and_duration','spacer','quality','picture_in_picture','fullscreen'],
-      seekBarColors:{base:'rgba(255,255,255,0.3)',buffered:'rgba(232,255,0,0.5)',played:'var(--accent)'}
+      addBigPlayButton: true,
+      controlPanelElements: ['mute', 'play_pause', 'time_and_duration', 'spacer', 'quality', 'picture_in_picture', 'fullscreen'],
+      seekBarColors: { base: 'rgba(255,255,255,0.3)', buffered: 'rgba(232,255,0,0.5)', played: 'var(--accent)' }
     });
 
     video.addEventListener('play', () => { video.muted = false; });
@@ -256,18 +316,28 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
     try{
       setMsg('Fetching channel data…');
       const res = await fetch(JSON_URL + '?_=' + Date.now());
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      allChannels = data.channels || [];
-    }catch(e){
-      return showBlock('Connection Error','Could not load channel list.<br><a href="index.html">← Go back</a>');
+      allChannels = data; // Direct array from the new URL
+    } catch(e){
+      console.error('Channel fetch error:', e);
+      return showBlock('Connection Error', 'Could not load channel list.<br><a href="index.html">← Go back</a>');
     }
 
-    if(!allChannels.length) return showBlock('No Channels','Channel list is empty.');
+    if(!allChannels || allChannels.length === 0) return showBlock('No Channels', 'Channel list is empty.');
 
     // Pick initial channel
-    const requestedId = getParam('id') || allChannels[0].id;
-    const exists = allChannels.find(c => c.id === requestedId);
-    await loadChannel(exists ? requestedId : allChannels[0].id);
+    const requestedId = getParam('id') || allChannels[0]?.id || allChannels[0]?.keyId;
+    // Try to find by id, if not found, use the first channel
+    let targetChannel = allChannels.find(c => c.id === requestedId);
+    if (!targetChannel && requestedId) {
+      // Try by keyId
+      targetChannel = allChannels.find(c => c.keyId === requestedId);
+    }
+    if (!targetChannel) targetChannel = allChannels[0];
+    if (!targetChannel) return showBlock('No Channels', 'No valid channel found.');
+
+    await loadChannel(targetChannel.id || targetChannel.keyId);
   }
 
   init();
