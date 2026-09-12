@@ -129,8 +129,7 @@
     .sp-btn:focus-visible{outline:2px solid #ef4444;outline-offset:2px;border-radius:6px}
     .sp-btn svg{width:18px;height:18px;display:block;pointer-events:none;flex-shrink:0}
     .sp-btn.active{opacity:1;color:#ef4444!important}
-    .fit-ratio{font-size:11px;font-weight:600;letter-spacing:.2px;line-height:1;
-      white-space:nowrap;pointer-events:none}
+    .fit-ratio{font-size:11px;font-weight:600;letter-spacing:.2px;line-height:1;white-space:nowrap;pointer-events:none}
     .shaka-controls-container button{color:#fff!important}
     .shaka-video-container{background-color:#000!important}
 
@@ -252,13 +251,8 @@ function setMsg(m)     { $loadMsg&&($loadMsg.textContent=m); }
 function hideOverlay() { $overlay&&($overlay.style.display="none"); }
 function getChId()     { return new URLSearchParams(location.search).get("id")||""; }
 function rawCookie(c)  { return c&&c.startsWith("__hdnea__=")?c.slice(10):(c||""); }
-function withCookie(u,r){
-  if(!u||!r) return u;
-  if(u.indexOf("__hdnea__")!==-1) return u;
-  return u+(u.indexOf("?")!==-1?"&":"?")+"__hdnea__="+r;
-}
 
-// ── Fetch Fresh Cookie ──────────────────────────────────────────────────
+// ── Fetch Fresh Cookie (FIXED for array response) ──────────────────────
 async function fetchFreshCookie() {
   try {
     console.log('🍪 Fetching cookie from:', COOKIE_API);
@@ -275,11 +269,21 @@ async function fetchFreshCookie() {
     
     var cookieValue = null;
     
-    // Parse cookie from response
-    if (data && data.cookie) {
+    // FIX: Handle array response format
+    if (Array.isArray(data)) {
+      // Response is an array like [{last_updated: "..."}, {cookie: "..."}]
+      for (var i = 0; i < data.length; i++) {
+        if (data[i] && data[i].cookie) {
+          cookieValue = data[i].cookie;
+          break;
+        }
+      }
+    } else if (data && data.cookie) {
       cookieValue = data.cookie;
     } else if (data && data.cookie_data) {
       cookieValue = data.cookie_data;
+    } else if (typeof data === 'string') {
+      cookieValue = data;
     }
     
     if (cookieValue) {
@@ -290,7 +294,7 @@ async function fetchFreshCookie() {
         console.log('🍪 Cookie fetched, expires at:', new Date(cookieExpiry));
       }
       cachedCookie = cookieValue;
-      console.log('✅ Cookie fetched successfully');
+      console.log('✅ Cookie fetched successfully:', cookieValue.substring(0, 60) + '...');
       return cookieValue;
     }
     console.warn('⚠️ No cookie found in response');
@@ -334,8 +338,8 @@ async function loadData(){
       name: ch.name || ch.title || 'Unnamed',
       stream_url: ch.streamUrl || ch.mpd_url || ch.stream_url || ch.url || '',
       logo: ch.logo || ch.logo_url || ch.image || '',
-      key_id: ch.keyId || ch.key_id || '',
-      key: ch.key || '',
+      key_id: (ch.keyId || ch.key_id || '').toLowerCase(),
+      key: (ch.key || '').toLowerCase(),
       cookie: ch.cookie || '',
       cookie_url: ch.cookies || ch.cookie_url || '',
       category: ch.group || ch.category || 'General'
@@ -382,6 +386,7 @@ function renderList(data){
     f.appendChild(a);
   });
   
+  $grid.innerHTML = '';
   $grid.appendChild(f);
   $list.style.display="flex";
 }
@@ -516,6 +521,7 @@ async function startPlayer(ch){
 
   var keyId=ch.key_id, key=ch.key, url=ch.stream_url;
   var restrictionsRelaxed=false;
+  var raw = rawCookie(cookieValue);
 
   function buildCfg(){
     var restr={};
@@ -549,7 +555,9 @@ async function startPlayer(ch){
       }
     };
     if (keyId && key) {
-      cfg.drm = { clearKeys: { [keyId]: key } };
+      var clearKeys = {};
+      clearKeys[keyId] = key;
+      cfg.drm = { clearKeys: clearKeys };
     }
     return cfg;
   }
@@ -557,7 +565,6 @@ async function startPlayer(ch){
   player.configure(buildCfg());
 
   var T=shaka.net.NetworkingEngine.RequestType;
-  var raw = rawCookie(cookieValue);
   
   player.getNetworkingEngine().registerRequestFilter(function(type,req){
     req.headers["Referer"]    ="https://www.jiotv.com/";
@@ -565,10 +572,8 @@ async function startPlayer(ch){
     req.headers["Origin"]     ="https://www.jiotv.com";
     if (cookieValue) {
       req.headers["Cookie"] = cookieValue;
-      console.log('🍪 Cookie header set');
     }
     if(type===T.MANIFEST||type===T.SEGMENT) {
-      // Always add cookie parameter to URL
       if (raw) {
         req.uris = req.uris.map(function(u){ 
           if (u.includes('__hdnea__')) return u;
@@ -576,7 +581,6 @@ async function startPlayer(ch){
           return u + sep + '__hdnea__=' + raw;
         });
       }
-      console.log('🔗 URL with cookie param:', req.uris[0]);
     }
   });
 
@@ -648,10 +652,12 @@ async function startPlayer(ch){
     setMsg("Loading stream…");
     toast("Loading…","warn",0);
     console.log('📺 Loading URL:', url);
+    console.log('🍪 Cookie value:', cookieValue ? cookieValue.substring(0, 60) + '...' : 'none');
     await player.load(url);
     hideOverlay();
     toast("Tap ▶ to start","ok",5000);
-  } catch(_){
+  } catch(e){
+    console.error('Load error:', e);
     hideOverlay();
     toast("Retrying…","warn",0);
     setTimeout(reload,1500);
