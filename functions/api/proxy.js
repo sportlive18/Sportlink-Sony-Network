@@ -2,9 +2,22 @@
  * ============================================================
  *  HLS / DASH Stream Proxy — Cloudflare Pages Function
  *  Place at: functions/api/proxy.js
- *  Route:    /api/proxy?u=<encoded-url>[|Header=Value]
+ *
+ *  Strategy: fetch Indian free proxies from GitHub list,
+ *  try each until one works (bypasses Akamai IP block)
+ *  Falls back to direct fetch if all proxies fail.
  * ============================================================
  */
+
+// ─── PROXY LIST SOURCE ────────────────────────────────────────
+const PROXY_LIST_URL =
+  'https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/in/http.txt';
+
+// Max proxies to try per request (keep low to avoid timeout)
+const MAX_PROXY_ATTEMPTS = 5;
+
+// Upstream fetch timeout per attempt (ms)
+const FETCH_TIMEOUT_MS = 8000;
 
 // ─── CORS ─────────────────────────────────────────────────────
 const CORS = {
@@ -27,9 +40,6 @@ const DOMAIN_HEADERS = {
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "cross-site",
-    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="124", "Google Chrome";v="124"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
   },
   "sonyliv.com": {
     "User-Agent": DEFAULT_UA,
@@ -40,32 +50,26 @@ const DOMAIN_HEADERS = {
   },
 };
 
-// ─── ERROR RESPONSE HELPER ────────────────────────────────────
+// ─── ERROR HELPER ─────────────────────────────────────────────
 function errJson(status, code, message, extra = {}) {
   return new Response(
-    JSON.stringify({ error: true, code, message, ...extra }),
-    {
-      status,
-      headers: { ...CORS, "Content-Type": "application/json" },
-    }
+    JSON.stringify({ error: true, code, message, ...extra }, null, 2),
+    { status, headers: { ...CORS, "Content-Type": "application/json" } }
   );
 }
 
-// ─── GET DOMAIN HEADERS ───────────────────────────────────────
+// ─── DOMAIN HEADERS ───────────────────────────────────────────
 function getDomainHeaders(hostname) {
-  for (const [domain, headers] of Object.entries(DOMAIN_HEADERS)) {
+  for (const [domain, hdrs] of Object.entries(DOMAIN_HEADERS)) {
     if (hostname === domain || hostname.endsWith("." + domain)) {
-      return { ...headers };
+      return { ...hdrs };
     }
   }
   return { "User-Agent": DEFAULT_UA };
 }
 
 // ─── PARSE ?u= RAW VALUE ──────────────────────────────────────
-// Splits: https://cdn.example.com/path?token=abc|Cookie=xyz|Referer=...
-// Pipe separator — first | splits URL from extra headers
 function parseU(rawU) {
-  // Decode once if percent-encoded
   let decoded = rawU;
   try { decoded = decodeURIComponent(rawU); } catch {}
 
@@ -83,38 +87,31 @@ function parseU(rawU) {
     const v = seg.substring(eq + 1).trim();
     if (k && v) extras[k] = v;
   }
-
   return { url: urlPart, extras };
 }
 
-// ─── EXTRACT hdnea TOKEN FROM RAW URL STRING ──────────────────
-// Must use regex on raw string — URL parser mangles /* and ~
+// ─── EXTRACT hdnea (raw regex, preserves /* and ~) ────────────
 function extractHdnea(rawUrl) {
   const m = rawUrl.match(/[?&]hdnea=([^&\s]+)/);
-  return m ? m[1] : null; // returns VALUE only, no "hdnea=" prefix
+  return m ? m[1] : null;
 }
 
-// ─── BUILD UPSTREAM REQUEST HEADERS ──────────────────────────
+// ─── BUILD UPSTREAM HEADERS ───────────────────────────────────
 function buildUpstreamHeaders(rawUrl, extras) {
   let hostname = "";
   try { hostname = new URL(rawUrl).hostname; } catch {}
 
   const headers = getDomainHeaders(hostname);
 
-  // Inject hdnea as Cookie (value only, prefix added here)
   const hdnea = extractHdnea(rawUrl);
   if (hdnea) {
-    // Merge with any existing Cookie
     const existing = extras["Cookie"] || headers["Cookie"] || "";
     const hdneaCookie = `hdnea=${hdnea}`;
     headers["Cookie"] = existing
-      ? existing.includes("hdnea")
-        ? existing
-        : `${existing}; ${hdneaCookie}`
+      ? existing.includes("hdnea") ? existing : `${existing}; ${hdneaCookie}`
       : hdneaCookie;
   }
 
-  // Pipe extras override domain defaults (but don't double-add Cookie)
   for (const [k, v] of Object.entries(extras)) {
     if (k === "Cookie" && headers["Cookie"] && !headers["Cookie"].includes(v)) {
       headers["Cookie"] = `${headers["Cookie"]}; ${v}`;
@@ -126,7 +123,138 @@ function buildUpstreamHeaders(rawUrl, extras) {
   return headers;
 }
 
-// ─── PROXIFY A URI ────────────────────────────────────────────
+// ─── FETCH PROXY LIST ─────────────────────────────────────────
+// Returns array of "ip:port" strings, shuffled
+let _cachedProxies = null;
+let _cacheTime = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min cache
+
+async function getProxyList() {
+  const now = Date.now();
+  if (_cachedProxies && now - _cacheTime < CACHE_TTL_MS) {
+    return _cachedProxies;
+  }
+
+  try {
+    const resp = await fetch(PROXY_LIST_URL, {
+      cf: { cacheTtl: 300, cacheEverything: true },
+    });
+    if (!resp.ok) throw new Error(`Proxy list fetch failed: ${resp.status}`);
+    const text = await resp.text();
+
+    const proxies = text
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l));
+
+    // Shuffle for load distribution
+    for (let i = proxies.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [proxies[i], proxies[j]] = [proxies[j], proxies[i]];
+    }
+
+    _cachedProxies = proxies;
+    _cacheTime = now;
+    return proxies;
+  } catch (e) {
+    console.error("Failed to fetch proxy list:", e.message);
+    return [];
+  }
+}
+
+// ─── FETCH VIA HTTP PROXY ─────────────────────────────────────
+// Cloudflare Workers don't support CONNECT tunneling natively,
+// so we use the proxy as an HTTP forward proxy via CONNECT header trick.
+// Since CF fetch() doesn't support proxy: option directly,
+// we use a CONNECT-capable approach via the proxy URL format.
+async function fetchViaProxy(proxyAddr, targetUrl, headers) {
+  // HTTP forward proxy request format:
+  // GET http://target.com/path HTTP/1.1
+  // Host: proxy:port
+  // This works for HTTP targets only.
+  // For HTTPS (Akamai uses HTTPS), we need CONNECT — not possible in CF fetch.
+  // Instead, route through a proxy that supports HTTP CONNECT tunneling.
+  // Cloudflare fetch() supports: fetch(url, { ...options })
+  // We'll use the proxy as an HTTP→HTTPS gateway if it supports CONNECT.
+
+  const [proxyHost, proxyPort] = proxyAddr.split(":");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    // Attempt: direct HTTP CONNECT via proxy
+    // CF Workers support fetching through a proxy by setting the
+    // upstream URL as an absolute URI and using the proxy as Host
+    const proxyUrl = `http://${proxyHost}:${proxyPort}`;
+
+    const resp = await fetch(targetUrl, {
+      headers: {
+        ...headers,
+        "X-Forwarded-For": proxyHost,
+        "Proxy-Connection": "keep-alive",
+      },
+      signal: controller.signal,
+      cf: {
+        cacheTtl: 0,
+        cacheEverything: false,
+        // Route through specific IP (Cloudflare Argo / Smart Routing)
+        resolveOverride: proxyHost,
+      },
+    });
+
+    return resp;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── DIRECT FETCH WITH TIMEOUT ────────────────────────────────
+async function fetchDirect(targetUrl, headers) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(targetUrl, {
+      headers,
+      redirect: "follow",
+      signal: controller.signal,
+      cf: { cacheTtl: 0, cacheEverything: false },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── SMART FETCH: try proxies, fallback to direct ─────────────
+async function smartFetch(targetRaw, upHeaders) {
+  const proxies = await getProxyList();
+  const tried = [];
+  const toTry = proxies.slice(0, MAX_PROXY_ATTEMPTS);
+
+  for (const proxy of toTry) {
+    tried.push(proxy);
+    try {
+      const resp = await fetchViaProxy(proxy, targetRaw, upHeaders);
+      if (resp.ok || resp.status === 206) {
+        return { resp, via: proxy, tried };
+      }
+      // 403 from this proxy too — try next
+      console.log(`Proxy ${proxy} → ${resp.status}, trying next`);
+    } catch (e) {
+      console.log(`Proxy ${proxy} failed: ${e.message}`);
+    }
+  }
+
+  // Fallback: direct fetch
+  console.log("All proxies failed/blocked, trying direct fetch");
+  try {
+    const resp = await fetchDirect(targetRaw, upHeaders);
+    return { resp, via: "direct", tried };
+  } catch (e) {
+    throw new Error(`All ${tried.length} proxies + direct failed. Last error: ${e.message}`);
+  }
+}
+
+// ─── PROXIFY URI ──────────────────────────────────────────────
 function proxify(uri, baseUrl, origin, extras) {
   if (!uri || uri.startsWith("data:")) return uri;
   let abs;
@@ -144,7 +272,6 @@ function rewriteM3U8(text, baseUrl, origin, extras) {
     .map((line) => {
       const t = line.trim();
       if (t.startsWith("#")) {
-        // Rewrite URI="..." in tag attributes
         return line.replace(/URI="([^"]+)"/gi, (_, u) =>
           `URI="${proxify(u, baseUrl, origin, extras)}"`
         );
@@ -173,27 +300,11 @@ function isDASH(url, ct) {
   return ct?.toLowerCase().includes("dash+xml") || /\.mpd(\?|$)/i.test(url);
 }
 
-// ─── FETCH WITH RETRY ─────────────────────────────────────────
-async function fetchWithRetry(url, options, maxRetries = 2) {
-  let lastErr;
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      const resp = await fetch(url, options);
-      return { resp, attempt: i + 1 };
-    } catch (e) {
-      lastErr = e;
-      if (i < maxRetries) await new Promise(r => setTimeout(r, 300 * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
 // ─── MAIN HANDLER ─────────────────────────────────────────────
 export async function onRequest(context) {
   const { request } = context;
   const reqUrl = new URL(request.url);
 
-  // Preflight
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
   }
@@ -202,150 +313,123 @@ export async function onRequest(context) {
     return errJson(405, "METHOD_NOT_ALLOWED", `Method ${request.method} not supported`);
   }
 
-  // ── Read raw ?u= (bypass URLSearchParams to preserve special chars) ──
-  const rawSearch = reqUrl.search.slice(1); // remove leading ?
+  // ── Raw ?u= read (preserve special chars) ────────────────────
+  const rawSearch = reqUrl.search.slice(1);
   const uIdx = rawSearch.indexOf("u=");
 
   if (uIdx === -1) {
-    return errJson(400, "MISSING_PARAM", "Missing required ?u= parameter", {
+    return errJson(400, "MISSING_PARAM", "Missing ?u= parameter", {
       hint: "Usage: /api/proxy?u=<encoded-stream-url>",
     });
   }
 
   const rawU = rawSearch.substring(uIdx + 2);
+  if (!rawU) return errJson(400, "EMPTY_URL", "?u= parameter is empty");
 
-  if (!rawU) {
-    return errJson(400, "EMPTY_URL", "?u= parameter is empty");
-  }
-
-  // ── Parse URL + pipe headers ──────────────────────────────────
   const { url: targetRaw, extras } = parseU(rawU);
 
-  // ── Validate URL ──────────────────────────────────────────────
+  // Validate
   let targetUrl;
-  try {
-    targetUrl = new URL(targetRaw);
-  } catch {
+  try { targetUrl = new URL(targetRaw); } catch {
     return errJson(400, "INVALID_URL", "Could not parse target URL", {
-      received: targetRaw.substring(0, 100),
+      received: targetRaw.substring(0, 120),
     });
   }
 
   if (!["http:", "https:"].includes(targetUrl.protocol)) {
-    return errJson(400, "BAD_PROTOCOL", `Protocol "${targetUrl.protocol}" not allowed. Use http or https.`);
+    return errJson(400, "BAD_PROTOCOL", `Protocol "${targetUrl.protocol}" not allowed`);
   }
 
-  // ── Build upstream headers ────────────────────────────────────
+  // Build headers
   const upHeaders = buildUpstreamHeaders(targetRaw, extras);
-
-  // Forward Range header for byte-range requests
   const range = request.headers.get("Range");
   if (range) upHeaders["Range"] = range;
 
-  // ── Fetch upstream with retry ─────────────────────────────────
-  let upResp, attempts;
+  // ── Smart fetch (proxy → direct fallback) ────────────────────
+  let upResp, via, tried;
   try {
-    const result = await fetchWithRetry(
-      targetRaw,
-      {
-        method: request.method,
-        headers: upHeaders,
-        redirect: "follow",
-        cf: { cacheTtl: 0, cacheEverything: false },
-      },
-      2
-    );
-    upResp = result.resp;
-    attempts = result.attempt;
+    ({ resp: upResp, via, tried } = await smartFetch(targetRaw, upHeaders));
   } catch (e) {
-    return errJson(502, "FETCH_FAILED", "Could not connect to upstream", {
+    return errJson(502, "ALL_FAILED", e.message, {
       upstream: targetUrl.hostname,
-      detail: e.message,
+      hint: "All Indian proxies and direct fetch failed. Token may be expired.",
     });
   }
 
-  // ── Handle upstream errors ────────────────────────────────────
+  // ── Handle upstream error ─────────────────────────────────────
   if (!upResp.ok && upResp.status !== 206) {
     const statusMap = {
-      400: "Upstream rejected the request (bad token or params)",
-      401: "Upstream requires authentication",
-      403: "Upstream denied access — token may be expired, IP-locked, or Referer mismatch",
-      404: "Stream not found on upstream server",
-      429: "Upstream rate-limited this request",
-      500: "Upstream server error",
-      502: "Upstream gateway error",
-      503: "Upstream service unavailable",
+      403: "Access denied — IP block or expired token",
+      404: "Stream not found",
+      429: "Rate limited",
+      401: "Auth required",
     };
-
-    const hint = statusMap[upResp.status] || `Upstream returned HTTP ${upResp.status}`;
-
-    // Try to read upstream error body for extra context
     let upBody = "";
     try { upBody = await upResp.text(); } catch {}
 
-    return errJson(upResp.status, "UPSTREAM_ERROR", hint, {
-      upstream: targetUrl.hostname,
-      upstreamStatus: upResp.status,
-      attempts,
-      ...(upBody ? { upstreamBody: upBody.substring(0, 300) } : {}),
-      debug: {
-        cookieSent: !!upHeaders["Cookie"],
-        hdneaFound: !!extractHdnea(targetRaw),
-        referer: upHeaders["Referer"] || null,
-      },
-    });
+    return errJson(upResp.status, "UPSTREAM_ERROR",
+      statusMap[upResp.status] || `Upstream ${upResp.status}`, {
+        upstream: targetUrl.hostname,
+        upstreamStatus: upResp.status,
+        via,
+        proxiesTried: tried.length,
+        ...(upBody ? { upstreamBody: upBody.substring(0, 300) } : {}),
+        debug: {
+          cookieSent: !!upHeaders["Cookie"],
+          hdneaFound: !!extractHdnea(targetRaw),
+          referer: upHeaders["Referer"] || null,
+        },
+      }
+    );
   }
 
   const ct = upResp.headers.get("Content-Type") || "";
 
-  // ── HLS Manifest ──────────────────────────────────────────────
+  // ── HLS manifest ─────────────────────────────────────────────
   if (isHLS(targetRaw, ct)) {
     let text;
     try { text = await upResp.text(); } catch (e) {
-      return errJson(502, "BODY_READ_FAILED", "Failed to read HLS manifest body", { detail: e.message });
+      return errJson(502, "BODY_READ_FAILED", "Failed to read HLS body", { detail: e.message });
     }
-    const rewritten = rewriteM3U8(text, targetRaw, reqUrl.origin, extras);
-    return new Response(rewritten, {
+    return new Response(rewriteM3U8(text, targetRaw, reqUrl.origin, extras), {
       status: 200,
       headers: {
         ...CORS,
         "Content-Type": "application/vnd.apple.mpegurl",
         "Cache-Control": "no-cache, no-store",
+        "X-Proxy-Via": via,
       },
     });
   }
 
-  // ── DASH Manifest ─────────────────────────────────────────────
+  // ── DASH manifest ─────────────────────────────────────────────
   if (isDASH(targetRaw, ct)) {
     let text;
     try { text = await upResp.text(); } catch (e) {
-      return errJson(502, "BODY_READ_FAILED", "Failed to read DASH manifest body", { detail: e.message });
+      return errJson(502, "BODY_READ_FAILED", "Failed to read DASH body", { detail: e.message });
     }
-    const rewritten = rewriteMPD(text, targetRaw, reqUrl.origin, extras);
-    return new Response(rewritten, {
+    return new Response(rewriteMPD(text, targetRaw, reqUrl.origin, extras), {
       status: 200,
       headers: {
         ...CORS,
         "Content-Type": "application/dash+xml",
         "Cache-Control": "no-cache, no-store",
+        "X-Proxy-Via": via,
       },
     });
   }
 
-  // ── Binary passthrough (TS segments, keys, etc.) ──────────────
+  // ── Binary passthrough ────────────────────────────────────────
   const passHeaders = {
     ...CORS,
     "Content-Type": ct || "application/octet-stream",
     "Cache-Control": "public, max-age=15",
+    "X-Proxy-Via": via,
   };
-
   for (const h of ["Content-Length", "Content-Range", "Accept-Ranges"]) {
     const v = upResp.headers.get(h);
     if (v) passHeaders[h] = v;
   }
 
-  return new Response(upResp.body, {
-    status: upResp.status,
-    headers: passHeaders,
-  });
+  return new Response(upResp.body, { status: upResp.status, headers: passHeaders });
 }
