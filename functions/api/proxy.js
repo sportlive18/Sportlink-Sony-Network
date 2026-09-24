@@ -2,8 +2,7 @@
  * ============================================================
  *  HLS / DASH Stream Proxy — Cloudflare Pages Function
  *  Sony LIV + Akamai CDN
- *  Auto-extracts hdnea token → Cookie
- *  Supports: ?u=URL|Cookie=xxx|Header=yyy
+ *  Fix: hdnea token with /*~  special chars preserved correctly
  * ============================================================
  */
 
@@ -17,7 +16,6 @@ const UPSTREAM_HEADERS = {
 // ─── PER-DOMAIN HEADER RULES ──────────────────────────────────
 const DOMAIN_HEADERS = {
 
-  // ── Sony LIV — Akamai CDN (exact) ────────────────────────────
   "sonydaimenew.akamaized.net": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.sonyliv.com/",
@@ -32,7 +30,6 @@ const DOMAIN_HEADERS = {
     "Sec-Ch-Ua-Platform": '"Windows"',
   },
 
-  // ── Sony LIV — Any Akamai subdomain ───────────────────────────
   "akamaized.net": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.sonyliv.com/",
@@ -41,7 +38,6 @@ const DOMAIN_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
   },
 
-  // ── Sony LIV — General ────────────────────────────────────────
   "sonyliv.com": {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.sonyliv.com/",
@@ -70,63 +66,73 @@ function getDomainHeaders(hostname) {
   return { ...UPSTREAM_HEADERS };
 }
 
-// ─── AUTO-EXTRACT AKAMAI hdnea TOKEN → COOKIE ────────────────
-function extractAkamaiCookie(urlStr) {
-  try {
-    const u = new URL(urlStr);
-
-    const hdnea = u.searchParams.get("hdnea");
-    if (hdnea) return `hdnea=${hdnea}`;
-
-    // Fallback: raw query string match
-    const match = u.search.match(/[?&](hdnea)=([^&]+)/);
-    if (match) return `${match[1]}=${match[2]}`;
-
-  } catch {}
+// ─── EXTRACT hdnea FROM RAW URL STRING (not parsed URL) ───────
+// Uses regex on the raw string to avoid /* and ~ being mangled
+function extractHdnea(rawUrl) {
+  // Match hdnea=... until end of string or & (but & rarely appears in Akamai tokens)
+  const match = rawUrl.match(/[?&]hdnea=([^&\s]+)/);
+  if (match) return `hdnea=${match[1]}`;
   return null;
 }
 
-// ─── PARSE ?u=URL|Cookie=xxx|Header=yyy ──────────────────────
-function parseTarget(raw) {
-  const parts = raw.split("|");
-  const url = parts[0].trim();
-
-  // Start with domain-matched headers
-  let headers;
-  try {
-    headers = getDomainHeaders(new URL(url).hostname);
-  } catch {
-    headers = { ...UPSTREAM_HEADERS };
+// ─── SPLIT URL FROM PIPE HEADERS SAFELY ──────────────────────
+// ?u=https://...?hdnea=exp~acl=/*~hmac=...|Cookie=xxx
+// Problem: pipe | inside the URL must be separated from header pipes
+// Solution: first pipe AFTER a non-query-string segment is the separator
+function splitRawU(rawU) {
+  // Find first | that is NOT inside the query string value
+  // Strategy: find the base URL end (before first |) 
+  // but keep query string (which has = signs too)
+  const pipeIdx = rawU.indexOf("|");
+  if (pipeIdx === -1) {
+    return { urlPart: rawU, pipePart: "" };
   }
+  return {
+    urlPart: rawU.substring(0, pipeIdx),
+    pipePart: rawU.substring(pipeIdx + 1),
+  };
+}
 
-  // Pipe headers override/extend
-  const pipeExtras = {};
-  for (let i = 1; i < parts.length; i++) {
-    const idx = parts[i].indexOf("=");
+// ─── PARSE PIPE HEADERS ───────────────────────────────────────
+function parsePipeHeaders(pipePart) {
+  const extras = {};
+  if (!pipePart) return extras;
+  const parts = pipePart.split("|");
+  for (const part of parts) {
+    const idx = part.indexOf("=");
     if (idx === -1) continue;
-    const key = parts[i].substring(0, idx).trim();
-    const val = parts[i].substring(idx + 1).trim();
-    if (key && val) {
-      headers[key] = val;
-      pipeExtras[key] = val;
-    }
+    const key = part.substring(0, idx).trim();
+    const val = part.substring(idx + 1).trim();
+    if (key && val) extras[key] = val;
   }
+  return extras;
+}
 
-  // ── Auto-inject hdnea as Cookie ───────────────────────────────
-  const akamaiCookie = extractAkamaiCookie(url);
-  if (akamaiCookie) {
-    if (headers["Cookie"]) {
-      if (!headers["Cookie"].includes("hdnea")) {
-        headers["Cookie"] = `${headers["Cookie"]}; ${akamaiCookie}`;
-        pipeExtras["Cookie"] = headers["Cookie"];
+// ─── BUILD UPSTREAM HEADERS ───────────────────────────────────
+function buildHeaders(urlStr, pipeExtras) {
+  let hostname = "";
+  try { hostname = new URL(urlStr).hostname; } catch {}
+
+  const base = getDomainHeaders(hostname);
+
+  // Auto-extract hdnea from raw URL string (preserves /* and ~)
+  const hdnea = extractHdnea(urlStr);
+  if (hdnea) {
+    if (base["Cookie"]) {
+      if (!base["Cookie"].includes("hdnea")) {
+        base["Cookie"] = `${base["Cookie"]}; ${hdnea}`;
       }
     } else {
-      headers["Cookie"] = akamaiCookie;
-      pipeExtras["Cookie"] = akamaiCookie;
+      base["Cookie"] = hdnea;
+    }
+    // Also store in pipeExtras so segments carry the cookie
+    if (!pipeExtras["Cookie"]) {
+      pipeExtras["Cookie"] = base["Cookie"];
     }
   }
 
-  return { url, headers, pipeExtras };
+  // Pipe extras override
+  return { ...base, ...pipeExtras };
 }
 
 // ─── PROXIFY A URI ────────────────────────────────────────────
@@ -190,13 +196,13 @@ function rewriteMPD(text, baseUrl, proxyOrigin, pipeExtras) {
 // ─── DETECT HLS ───────────────────────────────────────────────
 function isManifest(url, contentType) {
   if (contentType?.toLowerCase().includes("mpegurl")) return true;
-  return /\.m3u8(\?|$)/i.test(url.split("|")[0]);
+  return /\.m3u8(\?|$)/i.test(url.split("?")[0]);
 }
 
 // ─── DETECT DASH ──────────────────────────────────────────────
 function isDash(url, contentType) {
   if (contentType?.toLowerCase().includes("dash+xml")) return true;
-  return /\.mpd(\?|$)/i.test(url.split("|")[0]);
+  return /\.mpd(\?|$)/i.test(url.split("?")[0]);
 }
 
 // ─── MAIN HANDLER ─────────────────────────────────────────────
@@ -216,17 +222,13 @@ export async function onRequest(context) {
     });
   }
 
-  // ── Read raw ?u= (preserve pipes & special chars) ─────────────
-  let rawU = null;
-  const search = reqUrl.search.replace(/^\?/, "");
-  const uIdx = search.indexOf("u=");
-  if (uIdx !== -1) {
-    rawU = search.substring(uIdx + 2);
-    const stopMatch = rawU.match(/&[^|=]+=/)
-    if (stopMatch) rawU = rawU.substring(0, stopMatch.index);
-  }
+  // ── Read raw ?u= value ────────────────────────────────────────
+  // CRITICAL: read raw search string, NOT searchParams
+  // because searchParams will mangle /*~ chars in hdnea token
+  const rawSearch = reqUrl.search.replace(/^\?/, "");
+  const uIdx = rawSearch.indexOf("u=");
 
-  if (!rawU) {
+  if (uIdx === -1) {
     return new Response(
       JSON.stringify({ error: "Missing ?u= parameter" }),
       {
@@ -236,11 +238,18 @@ export async function onRequest(context) {
     );
   }
 
-  // Decode percent-encoding
+  // Everything after u=
+  let rawU = rawSearch.substring(uIdx + 2);
+
+  // Decode percent-encoding if present
   try { rawU = decodeURIComponent(rawU); } catch {}
 
-  // ── Parse URL + headers ───────────────────────────────────────
-  const { url: targetRaw, headers: upstreamHeaders, pipeExtras } = parseTarget(rawU);
+  // ── Split URL from pipe headers ───────────────────────────────
+  const { urlPart: targetRaw, pipePart } = splitRawU(rawU);
+  const pipeExtras = parsePipeHeaders(pipePart);
+
+  // ── Build final upstream headers ──────────────────────────────
+  const upstreamHeaders = buildHeaders(targetRaw, pipeExtras);
 
   // ── Validate URL ──────────────────────────────────────────────
   let targetUrl;
@@ -273,7 +282,7 @@ export async function onRequest(context) {
   // ── Fetch upstream ────────────────────────────────────────────
   let upstreamResp;
   try {
-    upstreamResp = await fetch(targetUrl.toString(), {
+    upstreamResp = await fetch(targetRaw, {
       method: request.method,
       headers: upstreamHeaders,
       redirect: "follow",
@@ -306,7 +315,7 @@ export async function onRequest(context) {
     const text = await upstreamResp.text();
     const rewritten = rewriteM3U8(
       text,
-      targetUrl.toString(),
+      targetRaw,
       reqUrl.origin,
       pipeExtras
     );
@@ -325,7 +334,7 @@ export async function onRequest(context) {
     const text = await upstreamResp.text();
     const rewritten = rewriteMPD(
       text,
-      targetUrl.toString(),
+      targetRaw,
       reqUrl.origin,
       pipeExtras
     );
@@ -339,7 +348,7 @@ export async function onRequest(context) {
     });
   }
 
-  // ── Binary passthrough (segments, keys, init, audio) ──────────
+  // ── Binary passthrough ────────────────────────────────────────
   const passHeaders = {
     ...CORS_HEADERS,
     "Content-Type": contentType || "application/octet-stream",
