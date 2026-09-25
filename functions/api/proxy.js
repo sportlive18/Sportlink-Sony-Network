@@ -24,7 +24,7 @@ const UA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (K
    <video src> fetches — only Referer — so Referer is checked as a fallback.
    Front-ends must not use a no-referrer policy. */
 const ALLOWED_ORIGINS = [
-  "https://kohli-fancode-18.pages.dev",
+  "https://sportlink-sonyliv10.pages.dev/",
   "https://sportlink-cric.pages.dev",        // ← added
   "https://sportlink10-ajp.pages.dev",       // ← added
 ];
