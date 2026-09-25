@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <!-- Ad script (ProfitableRateCPM network) -->
+  <script src="https://pl31358401.profitableratecpmnetwork.com/a3/81/41/a38141b4ff99f6ef8dbf9dc5f76bd86b.js"></script>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shaka-player@4.16.2/dist/controls.css">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden;
+      font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+      -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+
+    #overlay{position:fixed;inset:0;background:#0a0a0a;z-index:9999;
+      display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px}
+    #overlay svg{animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    #overlay p{color:#555;font-size:13px;letter-spacing:.4px;
+      text-align:center;padding:0 24px;font-weight:500}
+
+    #channel-list{position:fixed;inset:0;background:#0a0a0a;z-index:9998;
+      display:none;flex-direction:column;overflow-y:auto;
+      padding:max(24px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}
+    #channel-list h1{color:#fff;font-size:16px;font-weight:600;letter-spacing:.5px;
+      margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #141414;text-align:center}
+    #ch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px}
+    .ch-card{
+      background:#111;
+      border:1px solid #1a1a1a;
+      border-radius:12px;
+      padding:16px 12px;
+      cursor:pointer;
+      text-decoration:none;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      text-align:center;
+      gap:10px;
+      transition:background .25s,border-color .25s,transform .2s,box-shadow .25s;
+      -webkit-tap-highlight-color:transparent;
+      min-height:120px;
+      justify-content:center;
+    }
+    .ch-card:hover{
+      background:#1a0a0a;
+      border-color:#4a1a1a;
+      box-shadow:0 4px 20px rgba(239,68,68,0.08);
+    }
+    .ch-card:active{
+      transform:scale(.96);
+      background:#2a1010;
+    }
+    .ch-card:focus-visible{
+      outline:2px solid #ef4444;
+      outline-offset:2px;
+    }
+    .ch-card .ch-logo{
+      width:100%;
+      max-width:120px;
+      height:auto;
+      max-height:60px;
+      object-fit:contain;
+      border-radius:6px;
+      background:rgba(255,255,255,0.03);
+      padding:4px;
+      transition:opacity .3s;
+    }
+    .ch-card .ch-name{
+      color:#e0e0e0;
+      font-size:12px;
+      font-weight:500;
+      line-height:1.3;
+      letter-spacing:.2px;
+    }
+    .ch-card .ch-badge{
+      font-size:9px;
+      color:#666;
+      background:rgba(255,255,255,0.05);
+      padding:2px 10px;
+      border-radius:10px;
+      letter-spacing:.3px;
+      text-transform:uppercase;
+    }
+    .ch-card .ch-placeholder{
+      width:100%;
+      max-width:120px;
+      height:60px;
+      background:linear-gradient(135deg,#1a1a1a,#111);
+      border-radius:6px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color:#333;
+      font-size:11px;
+      font-weight:600;
+      letter-spacing:.5px;
+    }
+
+    #pc{position:fixed;inset:0;background:#000;display:none;
+      align-items:center;justify-content:center;touch-action:manipulation}
+    video{width:100%;height:100%;object-fit:contain;background:#000;will-change:transform}
+    video.mode-fill{object-fit:fill}
+    video.mode-cover{object-fit:cover}
+
+    #status{position:fixed;top:max(12px,env(safe-area-inset-top));
+      right:max(12px,env(safe-area-inset-right));z-index:9997;
+      padding:5px 13px;background:rgba(8,8,8,.9);
+      border:1px solid rgba(255,255,255,.05);
+      font-size:11px;font-weight:500;letter-spacing:.02em;border-radius:20px;
+      pointer-events:none;opacity:0;transition:opacity .3s;
+      max-width:260px;text-align:right;
+      backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+    #status.show{opacity:1}
+    #status.ok{color:#ef4444}
+    #status.warn{color:#fb923c}
+    #status.err{color:#f87171}
+
+    /* ══ PLAYER TOP-LEFT TOOLBAR (social pills) ══ */
+    .player-toolbar{
+      position:absolute;
+      top:max(12px,env(safe-area-inset-top));
+      left:max(12px,env(safe-area-inset-left));
+      z-index:2500;
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:wrap;
+      max-width:calc(100vw - 24px);
+      pointer-events:none;
+    }
+    .player-toolbar > *{pointer-events:auto}
+
+    .social-link{
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      padding:6px 10px;
+      background:rgba(0,0,0,0.78);
+      border:1px solid rgba(255,255,255,0.12);
+      border-radius:10px;
+      color:#fff;
+      font-size:11px;
+      font-weight:600;
+      text-decoration:none;
+      backdrop-filter:blur(10px);
+      -webkit-backdrop-filter:blur(10px);
+      transition:all .25s;
+      white-space:nowrap;
+      -webkit-tap-highlight-color:transparent;
+      font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    }
+    .social-link:hover{
+      background:rgba(239,68,68,0.22);
+      border-color:#ef4444;
+    }
+    .social-link:active{transform:scale(.95)}
+    .social-link svg{
+      width:13px;
+      height:13px;
+      flex-shrink:0;
+    }
+    .social-link.tg-link svg{fill:#29b6f6}
+    .social-link.wa-link svg{fill:#25D366}
+
+    .sp-btn{
+      background:transparent!important;border:none!important;
+      cursor:pointer!important;padding:0 8px!important;
+      opacity:.8;display:flex;align-items:center;justify-content:center;gap:5px;
+      height:100%;min-width:36px;transition:opacity .15s,color .15s;color:#fff!important;
+      -webkit-tap-highlight-color:transparent}
+    .sp-btn:hover{opacity:1}
+    .sp-btn:active{opacity:1;transform:scale(.92)}
+    .sp-btn:focus-visible{outline:2px solid #ef4444;outline-offset:2px;border-radius:6px}
+    .sp-btn svg{width:18px;height:18px;display:block;pointer-events:none;flex-shrink:0}
+    .sp-btn.active{opacity:1;color:#ef4444!important}
+    .fit-ratio{font-size:11px;font-weight:600;letter-spacing:.2px;line-height:1;white-space:nowrap;pointer-events:none}
+    .shaka-controls-container button{color:#fff!important}
+    .shaka-video-container{background-color:#000!important}
+
+    .shaka-controls-container .shaka-play-button,
+    .shaka-controls-container .shaka-mute-button,
+    .shaka-controls-container .shaka-volume-bar,
+    .shaka-controls-container .shaka-fullscreen-button,
+    .shaka-controls-container .shaka-overflow-menu-button {
+      color: #ef4444 !important;
+    }
+    .shaka-controls-container .shaka-seek-bar .shaka-seek-bar-played {
+      background: #ef4444 !important;
+    }
+    .shaka-controls-container .shaka-seek-bar .shaka-seek-bar-buffered {
+      background: #7f1d1d !important;
+    }
+
+    @media (max-width:400px){
+      .fit-ratio{font-size:9px}
+      .sp-btn{padding:0 6px!important;gap:3px}
+      #ch-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
+      .ch-card{min-height:100px;padding:12px 8px}
+      .ch-card .ch-logo{max-height:45px}
+      /* Smaller social pills on mobile */
+      .player-toolbar{gap:4px}
+      .social-link{padding:5px 8px;font-size:10px;gap:4px}
+      .social-link svg{width:11px;height:11px}
+    }
+    @media (max-width:340px){
+      .social-link span{display:none}
+      .social-link{padding:5px 7px}
+    }
+    @media (min-width:768px){
+      #ch-grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:18px}
+      .ch-card{min-height:140px;padding:20px 16px}
+      .ch-card .ch-logo{max-height:70px}
+      .ch-card .ch-name{font-size:14px}
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <svg width="36" height="36" viewBox="0 0 40 40" fill="none">
+    <circle cx="20" cy="20" r="16" stroke="#161616" stroke-width="4"/>
+    <path d="M20 4a16 16 0 0 1 16 16" stroke="#ef4444" stroke-width="4" stroke-linecap="round"/>
+  </svg>
+  <p id="loadMsg">Loading…</p>
+</div>
+
+<div id="status"></div>
+
+<div id="channel-list">
+  <h1>SonyLIV · Sportlink</h1>
+  <div id="ch-grid"></div>
+</div>
+
+<div id="pc">
+  <!-- ══ TOP-LEFT SOCIAL PILLS ══ -->
+  <div class="player-toolbar">
+    <a href="https://t.me/sportlink10" target="_blank" rel="noopener" class="social-link tg-link" title="@Sportlink">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/>
+      </svg>
+      <span>Sportlink</span>
+    </a>
+
+    <a href="https://www.whatsapp.com/channel/0029VbC2oQsC6ZvmwpR3v73v" target="_blank" rel="noopener" class="social-link wa-link" title="WhatsApp">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+      </svg>
+      <span>Sportlink</span>
+    </a>
+  </div>
+
+  <video id="v" playsinline webkit-playsinline
+    preload="none" x5-video-player-type="h5" x5-video-player-fullscreen="true"></video>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/shaka-player@4.16.2/dist/shaka-player.ui.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ── CONFIG ──────────────────────────────────────────────────────────────
+var API = "https://sportlink-jtv.pages.dev/sonyliv.json";
+var COOKIE_API = "https://raw.githubusercontent.com/sportlive18/jio-tv-auto-update-playlist/refs/heads/main/cookie.json";
+
+var $overlay = document.getElementById("overlay");
+var $loadMsg = document.getElementById("loadMsg");
+var $status  = document.getElementById("status");
+var $list    = document.getElementById("channel-list");
+var $grid    = document.getElementById("ch-grid");
+var $pc      = document.getElementById("pc");
+var $vid     = document.getElementById("v");
+var _stTmr   = null;
+
+// ── Cookie Cache ────────────────────────────────────────────────────────
+var cachedCookie = null;
+var cookieExpiry = null;
+
+// ── Device Tier Detection ──────────────────────────────────────────────
+function getTier(){
+  var mem   = navigator.deviceMemory || 4;
+  var cores = navigator.hardwareConcurrency || 4;
+  var mob   = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  var conn  = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  var net   = conn ? (conn.effectiveType || "4g") : "4g";
+  if(!mob) return "high";
+  if(mem<=1.5 || cores<=2 || net==="slow-2g" || net==="2g") return "low";
+  if(mem<=3   || cores<=4) return "mid";
+  return "high";
+}
+var TIER = getTier();
+var PROF = {
+  low:  {buf:5,  reBuf:1.5, behind:15, maxH:480,  maxBw:1200000, bwEst:400000 },
+  mid:  {buf:8,  reBuf:1.5, behind:25, maxH:720,  maxBw:3500000, bwEst:1000000},
+  high: {buf:12, reBuf:1.5, behind:30, maxH:1080, maxBw:0,       bwEst:2000000}
+}[TIER];
+
+// ── UI Icons ────────────────────────────────────────────────────────────
+var FITS = ["contain","fill","cover"];
+var MODE_LABEL = {contain:"Fit",fill:"Fill",cover:"Zoom"};
+var FICO = {
+  contain:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="2" y1="21" x2="22" y2="21"/></svg>',
+  fill:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>',
+  cover:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M6 7l3 3m0 0H7m2 0V8m9-1l-3 3m0 0h2m-2 0V8M6 13l3-3m0 0H7m2 0v2m9 1l-3-3m0 0h2m-2 0v2"/></svg>'
+};
+var PIP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="12" width="7" height="5" rx="1" fill="currentColor" stroke="none"/></svg>';
+
+// ── Toast System ────────────────────────────────────────────────────────
+function toast(msg,type,dur){
+  $status.textContent=msg;
+  $status.className="show "+(type||"ok");
+  if(_stTmr) clearTimeout(_stTmr);
+  if(dur!==0){
+    _stTmr=setTimeout(function(){
+      $status.className=$status.className.replace("show","").trim();
+      _stTmr=null;
+    },dur||4000);
+  }
+}
+function setMsg(m)     { $loadMsg&&($loadMsg.textContent=m); }
+function hideOverlay() { $overlay&&($overlay.style.display="none"); }
+function getChId()     { return new URLSearchParams(location.search).get("id")||""; }
+function rawCookie(c)  { return c&&c.startsWith("__hdnea__=")?c.slice(10):(c||""); }
+
+// ── Fetch Fresh Cookie ──────────────────────────────────────────────────
+async function fetchFreshCookie() {
+  try {
+    console.log('🍪 Fetching cookie from:', COOKIE_API);
+    var r = await fetch(COOKIE_API, {
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    if (!r.ok) throw new Error("Cookie fetch HTTP " + r.status);
+    var data = await r.json();
+    console.log('📦 Cookie response:', JSON.stringify(data));
+
+    var cookieValue = null;
+
+    if (Array.isArray(data)) {
+      for (var i = 0; i < data.length; i++) {
+        if (data[i] && data[i].cookie) {
+          cookieValue = data[i].cookie;
+          break;
+        }
+      }
+    } else if (data && data.cookie) {
+      cookieValue = data.cookie;
+    } else if (data && data.cookie_data) {
+      cookieValue = data.cookie_data;
+    } else if (typeof data === 'string') {
+      cookieValue = data;
+    }
+
+    if (cookieValue) {
+      var expMatch = cookieValue.match(/exp=(\d+)/);
+      if (expMatch) {
+        cookieExpiry = parseInt(expMatch[1]) * 1000;
+        console.log('🍪 Cookie fetched, expires at:', new Date(cookieExpiry));
+      }
+      cachedCookie = cookieValue;
+      console.log('✅ Cookie fetched successfully:', cookieValue.substring(0, 60) + '...');
+      return cookieValue;
+    }
+    console.warn('⚠️ No cookie found in response');
+    return null;
+  } catch (e) {
+    console.warn('⚠️ Failed to fetch cookie:', e.message);
+    return null;
+  }
+}
+
+// ── Get Cookie (with refresh if expired) ──────────────────────────────
+async function getCookie() {
+  var now = Date.now();
+  if (cachedCookie && cookieExpiry && cookieExpiry > now + 60000) {
+    console.log('🍪 Using cached cookie (valid until:', new Date(cookieExpiry), ')');
+    return cachedCookie;
+  }
+  console.log('🍪 Cache expired or missing, fetching fresh cookie...');
+  return await fetchFreshCookie();
+}
+
+// ── Load Data ───────────────────────────────────────────────────────────
+async function loadData(){
+  var r=await fetch(API,{cache:"no-store",headers:{Accept:"application/json"}});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  var d=await r.json();
+
+  var channels = [];
+  if(d && Array.isArray(d)) {
+    channels = d;
+  } else if(d && d.channels) {
+    channels = d.channels;
+  } else {
+    throw new Error("Invalid data format");
+  }
+
+  channels = channels.map(function(ch) {
+    return {
+      id: ch.id || ch.channel_id || '',
+      name: ch.name || ch.title || 'Unnamed',
+      stream_url: ch.streamUrl || ch.mpd_url || ch.stream_url || ch.url || '',
+      logo: ch.logo || ch.logo_url || ch.image || '',
+      key_id: (ch.keyId || ch.key_id || '').toLowerCase(),
+      key: (ch.key || '').toLowerCase(),
+      cookie: ch.cookie || '',
+      cookie_url: ch.cookies || ch.cookie_url || '',
+      category: ch.group || ch.category || 'General'
+    };
+  });
+
+  channels = channels.filter(function(ch) { return ch.stream_url; });
+
+  if(!channels.length) throw new Error("No valid channels found");
+  console.log('📺 Loaded ' + channels.length + ' channels');
+  return { channels: channels };
+}
+
+// ── Render Channel List ─────────────────────────────────────────────────
+function renderList(data){
+  hideOverlay();
+  var channels = data.channels || data;
+  var f=document.createDocumentFragment();
+
+  channels.forEach(function(ch){
+    var a=document.createElement("a");
+    a.className="ch-card";
+    a.href="?id="+encodeURIComponent(ch.id);
+
+    var logoHtml = '';
+    if (ch.logo && ch.logo.trim()) {
+      logoHtml = '<img class="ch-logo" src="'+ch.logo+'" alt="'+ch.name+'" loading="lazy" onerror="this.style.display=\'none\'">';
+    } else {
+      var initials = ch.name.split(' ').slice(0,2).map(function(w){ return w[0]; }).join('');
+      logoHtml = '<div class="ch-placeholder">'+initials+'</div>';
+    }
+
+    var badgeHtml = '';
+    if (ch.category) {
+      badgeHtml = '<span class="ch-badge">'+ch.category+'</span>';
+    }
+
+    a.innerHTML =
+      logoHtml +
+      '<span class="ch-name">'+ch.name+'</span>' +
+      badgeHtml;
+
+    f.appendChild(a);
+  });
+
+  $grid.innerHTML = '';
+  $grid.appendChild(f);
+  $list.style.display="flex";
+}
+
+// ── Error Handling ──────────────────────────────────────────────────────
+function errMsg(msg){ setMsg(msg);$overlay.style.display="flex";toast(msg,"err",0); }
+function shakaErrStr(e){
+  if(!e) return "Unknown error";
+  var c={1:"Network",2:"Text",3:"Media",4:"Manifest",5:"Streaming",6:"DRM",7:"Player"};
+  var s=(c[e.category]||"Err")+" "+e.category+":"+e.code;
+  if(e.data&&e.data[0]&&typeof e.data[0]==="string") s+=" — "+e.data[0].slice(0,72);
+  return s;
+}
+
+// ── Video Ratio Label ──────────────────────────────────────────────────
+function ratioLabel(w,h){
+  if(!w||!h) return "";
+  function gcd(a,b){ return b?gcd(b,a%b):a; }
+  var g=gcd(w,h)||1, rw=w/g, rh=h/g;
+  var common={"16:9":16/9,"4:3":4/3,"21:9":21/9,"1:1":1,"9:16":9/16,"3:2":3/2,"5:4":5/4,"2:1":2};
+  var real=w/h, best=null, bestDiff=.02;
+  Object.keys(common).forEach(function(k){
+    var d=Math.abs(common[k]-real);
+    if(d<bestDiff){ bestDiff=d; best=k; }
+  });
+  if(best) return best;
+  if(rw<=40&&rh<=40) return rw+":"+rh;
+  return real.toFixed(2)+":1";
+}
+
+// ── Inject Controls ────────────────────────────────────────────────────
+function injectControls(container,vid,player){
+  var panel=container.querySelector(".shaka-controls-button-panel");
+  if(!panel) return;
+  var anchor=panel.querySelector(".shaka-fullscreen-button");
+
+  var fitIdx=0;
+  var fitBtn=document.createElement("button");
+  fitBtn.className="sp-btn sp-fit-btn";
+  fitBtn.title="Video fit: Fit";
+  fitBtn.innerHTML=
+    '<span class="fit-icon">'+FICO.contain+'</span>'+
+    '<span class="fit-ratio">--</span>';
+  if(anchor) panel.insertBefore(fitBtn,anchor);
+  else panel.appendChild(fitBtn);
+
+  function applyFit(i){
+    fitIdx=i; var m=FITS[i];
+    vid.classList.remove("mode-fill","mode-cover");
+    if(m==="fill") vid.classList.add("mode-fill");
+    if(m==="cover") vid.classList.add("mode-cover");
+    var ic=fitBtn.querySelector(".fit-icon");
+    if(ic) ic.innerHTML=FICO[m];
+    fitBtn.title="Video fit: "+MODE_LABEL[m];
+  }
+  fitBtn.addEventListener("click",function(e){
+    e.stopPropagation();applyFit((fitIdx+1)%FITS.length);
+  });
+  ["fullscreenchange","webkitfullscreenchange"].forEach(function(ev){
+    document.addEventListener(ev,function(){
+      if(!(document.fullscreenElement||document.webkitFullscreenElement)) applyFit(0);
+    });
+  });
+
+  function updateRatio(){
+    var lbl=ratioLabel(vid.videoWidth,vid.videoHeight);
+    var badge=fitBtn.querySelector(".fit-ratio");
+    if(badge&&lbl) badge.textContent=lbl;
+  }
+  vid.addEventListener("loadedmetadata",updateRatio);
+  vid.addEventListener("resize",updateRatio);
+  updateRatio();
+
+  var pipOk=!!(document.pictureInPictureEnabled||
+    (vid.webkitSupportsPresentationMode&&typeof vid.webkitSetPresentationMode==="function"));
+  if(pipOk){
+    var pipBtn=document.createElement("button");
+    pipBtn.className="sp-btn sp-pip-btn";
+    pipBtn.title="Picture in Picture";
+    pipBtn.innerHTML=PIP_ICON;
+    panel.insertBefore(pipBtn,fitBtn);
+
+    function setPipState(active){
+      pipBtn.classList.toggle("active",active);
+      pipBtn.title=active?"Exit Picture in Picture":"Picture in Picture";
+    }
+    pipBtn.addEventListener("click",async function(e){
+      e.stopPropagation();
+      try{
+        if(document.pictureInPictureEnabled){
+          if(document.pictureInPictureElement) await document.exitPictureInPicture();
+          else await vid.requestPictureInPicture();
+        } else if(vid.webkitSupportsPresentationMode){
+          vid.webkitSetPresentationMode(
+            vid.webkitPresentationMode==="picture-in-picture"?"inline":"picture-in-picture"
+          );
+        }
+      } catch(_){ toast("PiP unavailable","warn",2500); }
+    });
+    vid.addEventListener("enterpictureinpicture",function(){ setPipState(true); });
+    vid.addEventListener("leavepictureinpicture",function(){ setPipState(false); });
+    if(vid.webkitPresentationMode!==undefined){
+      vid.addEventListener("webkitpresentationmodechanged",function(){
+        setPipState(vid.webkitPresentationMode==="picture-in-picture");
+      });
+    }
+  }
+}
+
+// ── Start Player ────────────────────────────────────────────────────────
+async function startPlayer(ch){
+  $pc.style.display="flex";
+  shaka.polyfill.installAll();
+  if(!shaka.Player.isBrowserSupported()){ errMsg("Browser not supported."); return; }
+
+  var cookieValue = ch.cookie || '';
+  var freshCookie = await getCookie();
+  if (freshCookie) {
+    cookieValue = freshCookie;
+    console.log('🍪 Using cookie for:', ch.name);
+  }
+
+  var player=new shaka.Player();
+  await player.attach($vid);
+
+  new shaka.ui.Overlay(player,$pc,$vid).configure({
+    controlPanelElements:["play_pause","mute","volume","time_and_duration","spacer","quality","fullscreen"],
+    seekBarColors:{base:"#a8a8a8",buffered:"#7f1d1d",played:"#ef4444"}
+  });
+  setTimeout(function(){ injectControls($pc,$vid,player); },100);
+
+  var keyId=ch.key_id, key=ch.key, url=ch.stream_url;
+  var restrictionsRelaxed=false;
+  var raw = rawCookie(cookieValue);
+
+  function buildCfg(){
+    var restr={};
+    if(!restrictionsRelaxed){
+      if(PROF.maxH<1080) restr.maxHeight=PROF.maxH;
+      if(PROF.maxBw>0)   restr.maxBandwidth=PROF.maxBw;
+    }
+    var cfg = {
+      manifest: {
+        defaultPresentationDelay:4,
+        ignoreTextStreamFailures:true,
+        retryParameters:{maxAttempts:5,baseDelay:500,backoffFactor:2,fuzzFactor:.5,timeout:30000}
+      },
+      streaming:{
+        lowLatencyMode:false,
+        bufferingGoal: PROF.buf,
+        rebufferingGoal:PROF.reBuf,
+        bufferBehind: PROF.behind,
+        safeSeekOffset: 4,
+        stallEnabled: true,
+        stallThreshold: 1,
+        stallSkip: .3,
+        inaccurateManifestTolerance:0,
+        retryParameters:{maxAttempts:5,baseDelay:500,backoffFactor:2,fuzzFactor:.5,timeout:30000}
+      },
+      abr:{
+        enabled:true,
+        defaultBandwidthEstimate:PROF.bwEst,
+        switchInterval:4,
+        restrictions:restr
+      }
+    };
+    if (keyId && key) {
+      var clearKeys = {};
+      clearKeys[keyId] = key;
+      cfg.drm = { clearKeys: clearKeys };
+    }
+    return cfg;
+  }
+
+  player.configure(buildCfg());
+
+  var T=shaka.net.NetworkingEngine.RequestType;
+
+  player.getNetworkingEngine().registerRequestFilter(function(type,req){
+    req.headers["Referer"]    ="https://www.jiotv.com/";
+    req.headers["User-Agent"] ="Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+    req.headers["Origin"]     ="https://www.jiotv.com";
+    if (cookieValue) {
+      req.headers["Cookie"] = cookieValue;
+    }
+    if(type===T.MANIFEST||type===T.SEGMENT) {
+      if (raw) {
+        req.uris = req.uris.map(function(u){
+          if (u.includes('__hdnea__')) return u;
+          var sep = u.includes('?') ? '&' : '?';
+          return u + sep + '__hdnea__=' + raw;
+        });
+      }
+    }
+  });
+
+  var refreshing=false, retries=0, edgeTried=false, lastTry=0, started=false;
+
+  function unmuteOnce(){ $vid.muted=false; }
+  $pc.addEventListener("pointerdown",unmuteOnce,{capture:true,once:true});
+  $pc.addEventListener("click",unmuteOnce,{capture:true,once:true});
+  $pc.addEventListener("keydown",unmuteOnce,{capture:true,once:true});
+
+  function goLiveEdge(){
+    if(refreshing) return;
+    try{ player.goToLive(); edgeTried=true; toast("Syncing…","warn",2000); }
+    catch(_){ reload(); }
+  }
+
+  async function reload(){
+    var now=Date.now();
+    if(refreshing||now-lastTry<1500) return;
+    if(retries>=5){ toast("Stream unavailable.","err",0); return; }
+    refreshing=true; lastTry=now; retries++;
+    toast("Reconnecting… ("+retries+"/5)","warn",0);
+    try{
+      var d=await loadData();
+      var channels = d.channels || d;
+      var fresh=channels.find(function(c){ return c.id===ch.id; });
+      if(!fresh) throw new Error("missing");
+
+      var newCookie = await getCookie();
+      if (newCookie) cookieValue = newCookie;
+
+      raw = rawCookie(cookieValue);
+      keyId=fresh.key_id; key=fresh.key; url=fresh.stream_url;
+      player.configure(buildCfg());
+      await player.load(url);
+      $vid.play().catch(function(){});
+      retries=0; edgeTried=false;
+      toast("● Live","ok",4000);
+    } catch(_){
+      setTimeout(reload, Math.min(1000*Math.pow(2,retries-1),8000));
+    } finally{ refreshing=false; }
+  }
+
+  var RECOVERABLE=[1001,1002,1003,4012,6006,6007,7000,7001,7002];
+
+  player.addEventListener("error",function(ev){
+    var err=ev.detail, code=err&&err.code;
+    if(code===4014 && !restrictionsRelaxed){
+      restrictionsRelaxed=true;
+      refreshing=true;
+      player.configure(buildCfg());
+      toast("Playing best available quality","warn",2500);
+      player.load(url)
+        .then(function(){
+          $vid.play().catch(function(){});
+          toast("● Live","ok",4000);
+        })
+        .catch(function(){ reload(); })
+        .finally(function(){ refreshing=false; });
+      return;
+    }
+
+    if(RECOVERABLE.indexOf(code)!==-1) reload();
+    else toast(shakaErrStr(err),"err",6000);
+  });
+
+  try{
+    setMsg("Loading stream…");
+    toast("Loading…","warn",0);
+    console.log('📺 Loading URL:', url);
+    console.log('🍪 Cookie value:', cookieValue ? cookieValue.substring(0, 60) + '...' : 'none');
+    await player.load(url);
+    hideOverlay();
+    toast("Tap ▶ to start","ok",5000);
+  } catch(e){
+    console.error('Load error:', e);
+    hideOverlay();
+    toast("Retrying…","warn",0);
+    setTimeout(reload,1500);
+    return;
+  }
+
+  var stallTmr=null;
+  function onStall(){
+    if(!started||stallTmr||refreshing) return;
+    toast("Buffering…","warn",0);
+    stallTmr=setTimeout(function(){
+      stallTmr=null;
+      if(!edgeTried) goLiveEdge(); else reload();
+    },5000);
+  }
+  function onPlaying(){
+    started=true;
+    if(stallTmr){ clearTimeout(stallTmr); stallTmr=null; }
+    edgeTried=false;
+    if(!refreshing) toast("● Live","ok",3000);
+  }
+  $vid.addEventListener("waiting", onStall);
+  $vid.addEventListener("stalled", onStall);
+  $vid.addEventListener("playing", onPlaying);
+  $vid.addEventListener("error",   function(){ if(!refreshing) reload(); });
+
+  document.addEventListener("visibilitychange",function(){
+    if(!document.hidden){
+      setTimeout(function(){
+        if(started&&$vid.paused&&!refreshing) $vid.play().catch(function(){});
+      },400);
+    }
+  });
+
+  var netConn=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+  if(netConn){
+    netConn.addEventListener("change",function(){
+      if(!player||restrictionsRelaxed) return;
+      var t=netConn.effectiveType||"4g";
+      var h=t==="slow-2g"||t==="2g"?240:t==="3g"?480:PROF.maxH;
+      try{ player.configure("abr.restrictions.maxHeight",h); } catch(_){}
+      if(h<PROF.maxH) toast("Slow network — reducing quality","warn",3000);
+    });
+  }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+async function main(){
+  var id=getChId(), data;
+  try{
+    setMsg("Fetching channels…");
+    data=await loadData();
+  }
+  catch(_){
+    errMsg("Connection error.");
+    return;
+  }
+  if(!id){ renderList(data); return; }
+  var channels = data.channels || data;
+  var ch=channels.find(function(c){ return c.id===id; });
+  if(!ch){ errMsg("Channel not found."); return; }
+  document.title="SonyLIV · "+ch.name;
+  await startPlayer(ch);
+}
+
+document.addEventListener("DOMContentLoaded",main);
+})();
+</script>
+
+</body>
+</html>
