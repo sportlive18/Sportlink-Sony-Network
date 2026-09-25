@@ -1,449 +1,237 @@
-/**
- * ============================================================
- *  HLS / DASH Stream Proxy — Cloudflare Pages Function
- *  Sony LIV + Hotstar + Akamai CDN
- *  Uses residential proxy for IP-locked Akamai tokens
- * ============================================================
- */
+// ============================================================
+//  FANCODE HLS PROXY — Cloudflare Pages Function
+//  File : functions/api/proxy.js
+//  Route: https://<your-pages-site>/api/proxy?url=<encoded>
+//         (also accepts ?u= for backward compat)
+//
+//  Serves both manifests and segments through the same endpoint.
+//  Content type is inspected: an .m3u8 gets its URLs rewritten to
+//  point back here, anything else is streamed as-is.
+//
+//  Locked to a fixed set of front-end origins and a fixed set of
+//  upstream hosts.
+// ============================================================
 
-// ─── DOMAINS THAT NEED RESIDENTIAL PROXY (Indian IP) ─────────
-const NEEDS_RESIDENTIAL = [
-  'sonydaimenew.akamaized.net',
-  'live09p.hotstar.com',
-  'hotstar.com',
+const REFERER = "https://www.fancode.com/";
+const ORIGIN  = "https://www.fancode.com";
+const UA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/* Front-ends allowed to call this function. The Origin header is set by
+   the browser and cannot be forged from JavaScript, so any page on a
+   different domain is rejected here.
+
+   Safari's native HLS media element does not send Origin for cross-origin
+   <video src> fetches — only Referer — so Referer is checked as a fallback.
+   Front-ends must not use a no-referrer policy. */
+const ALLOWED_ORIGINS = [
+  "https://kohli-fancode-18.pages.dev",
+  "https://sportlink-cric.pages.dev",        // ← added
+  "https://sportlink10-ajp.pages.dev",       // ← added
 ];
 
-// ─── FREE INDIAN RESIDENTIAL PROXY LIST ──────────────────────
-const PROXY_LIST_URL =
-  'https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/in/http.txt';
+/* Upstream hosts this function will fetch. Anything else is rejected, so
+   the ?url= parameter cannot be abused to relay arbitrary internet traffic. */
+const ALLOWED_UPSTREAM = [
+  "fancode.com",
+  "in-mc-flive.fancode.com",
+  "dai-fancode.pages.dev",
+];
 
-// ─── DEFAULT UPSTREAM HEADERS ─────────────────────────────────
-const UPSTREAM_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Referer": "https://www.sonyliv.com/",
-  "Origin": "https://www.sonyliv.com",
-};
+/* Allow the function's own origin as a caller. Same-origin GETs do not
+   send Origin, and if the player sets referrer=no-referrer they do not
+   send Referer either. In that case we trust the browser-set
+   Sec-Fetch-Site header, which JavaScript cannot forge. */
+const ALLOW_SAME_ORIGIN = true;
 
-// ─── PER-DOMAIN HEADER RULES ──────────────────────────────────
-const DOMAIN_HEADERS = {
+/* ------------------------------------------------------------------ */
 
-  "sonydaimenew.akamaized.net": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.sonyliv.com/",
-    "Origin": "https://www.sonyliv.com",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "cross-site",
-    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-  },
+function hostAllowed(host) {
+  return ALLOWED_UPSTREAM.some(s => host === s || host.endsWith("." + s));
+}
 
-  "akamaized.net": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.sonyliv.com/",
-    "Origin": "https://www.sonyliv.com",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-  },
-
-  "sonyliv.com": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.sonyliv.com/",
-    "Origin": "https://www.sonyliv.com",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-  },
-
-  "live09p.hotstar.com": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.hotstar.com/",
-    "Origin": "https://www.hotstar.com",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "cross-site",
-  },
-
-  "hotstar.com": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.hotstar.com/",
-    "Origin": "https://www.hotstar.com",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-  },
-
-};
-
-// ─── CORS HEADERS ─────────────────────────────────────────────
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-  "Access-Control-Allow-Headers": "*",
-};
-
-// ─── PROXY LIST CACHE ─────────────────────────────────────────
-let proxyCache = [];
-let proxyCacheTime = 0;
-const PROXY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-// ─── FETCH PROXY LIST ─────────────────────────────────────────
-async function getProxyList() {
-  const now = Date.now();
-  if (proxyCache.length > 0 && now - proxyCacheTime < PROXY_CACHE_TTL) {
-    return proxyCache;
+/* Return the matched origin if the request is permitted, else null. */
+function matchOrigin(request, selfOrigin) {
+  /* 1. Explicit whitelist for cross-origin callers */
+  const origin = request.headers.get("Origin");
+  if (origin) {
+    return ALLOWED_ORIGINS.includes(origin) ? origin : null;
   }
 
-  try {
-    const resp = await fetch(PROXY_LIST_URL);
-    const text = await resp.text();
-    const proxies = text
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l && l.includes(':') && !l.startsWith('#'));
-
-    if (proxies.length > 0) {
-      proxyCache = proxies;
-      proxyCacheTime = now;
-    }
-    return proxyCache;
-  } catch {
-    return proxyCache; // return stale if fetch fails
+  /* 2. Same-origin requests: browsers do NOT send Origin for same-origin
+        GET fetches, and the player sets referrer=no-referrer, so we must
+        rely on Sec-Fetch-Site. Browsers set this themselves and JS
+        cannot forge it. */
+  const site = request.headers.get("Sec-Fetch-Site");
+  if (ALLOW_SAME_ORIGIN && site === "same-origin") {
+    return selfOrigin;
   }
-}
 
-// ─── PICK RANDOM PROXY ────────────────────────────────────────
-function pickProxy(proxies) {
-  if (!proxies.length) return null;
-  return proxies[Math.floor(Math.random() * proxies.length)];
-}
-
-// ─── FETCH VIA RESIDENTIAL PROXY ─────────────────────────────
-// Cloudflare Workers don't support CONNECT tunneling directly,
-// so we use a CONNECT-capable relay or fetch via proxy URL
-async function fetchViaProxy(targetUrl, headers, proxyAddr, method = "GET") {
-  const [proxyHost, proxyPort] = proxyAddr.split(':');
-
-  // Build proxy URL — route request through HTTP proxy
-  // Cloudflare supports fetching via proxy using the undocumented
-  // cf.resolveOverride + custom upstream approach
-  // Best supported method: use a proxy relay endpoint
-  const proxyUrl = `http://${proxyHost}:${proxyPort}`;
-
-  try {
-    // Method: Use fetch with proxy headers
-    // This works because Cloudflare allows outbound HTTP proxying
-    const resp = await fetch(targetUrl, {
-      method,
-      headers: {
-        ...headers,
-        "X-Forwarded-For": `${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}`,
-      },
-      redirect: "follow",
-      cf: {
-        cacheTtl: 0,
-        cacheEverything: false,
-        // Route through Indian Cloudflare PoP
-        resolveOverride: proxyHost,
-      },
-    });
-    return resp;
-  } catch {
-    // Fallback: direct fetch
-    return await fetch(targetUrl, {
-      method,
-      headers,
-      redirect: "follow",
-      cf: { cacheTtl: 0, cacheEverything: false },
-    });
+  /* 3. Referer fallback (Safari HLS element sometimes sends only this) */
+  const referer = request.headers.get("Referer");
+  if (referer) {
+    try {
+      const refOrigin = new URL(referer).origin;
+      if (ALLOWED_ORIGINS.includes(refOrigin)) return refOrigin;
+      if (ALLOW_SAME_ORIGIN && refOrigin === selfOrigin) return refOrigin;
+    } catch { /* fall through */ }
   }
-}
-
-// ─── CHECK IF DOMAIN NEEDS RESIDENTIAL ───────────────────────
-function needsResidential(hostname) {
-  return NEEDS_RESIDENTIAL.some(
-    s => hostname === s || hostname.endsWith('.' + s)
-  );
-}
-
-// ─── GET DOMAIN BASE HEADERS ──────────────────────────────────
-function getDomainHeaders(hostname) {
-  if (DOMAIN_HEADERS[hostname]) return { ...DOMAIN_HEADERS[hostname] };
-  for (const [domain, headers] of Object.entries(DOMAIN_HEADERS)) {
-    if (hostname.endsWith('.' + domain) || hostname === domain) {
-      return { ...headers };
-    }
-  }
-  return { ...UPSTREAM_HEADERS };
-}
-
-// ─── EXTRACT AKAMAI TOKEN FROM RAW URL STRING ─────────────────
-function extractAkamaiCookie(rawUrl) {
-  const match = rawUrl.match(/[?&](hdnea|hdntl|hdnts)=([^&\s|]+)/);
-  if (match) return `${match[1]}=${match[2]}`;
   return null;
 }
 
-// ─── SPLIT URL FROM PIPE HEADERS ─────────────────────────────
-function splitRawU(rawU) {
-  const pipeIdx = rawU.indexOf("|");
-  if (pipeIdx === -1) return { urlPart: rawU, pipePart: "" };
+/* CORS headers echo the specific origin rather than `*`. */
+function corsHeaders(matchedOrigin) {
   return {
-    urlPart: rawU.substring(0, pipeIdx),
-    pipePart: rawU.substring(pipeIdx + 1),
+    "Access-Control-Allow-Origin": matchedOrigin || ALLOWED_ORIGINS[0] || "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Expose-Headers": "*",
+    "Vary": "Origin",
   };
 }
 
-// ─── PARSE PIPE HEADERS ───────────────────────────────────────
-function parsePipeHeaders(pipePart) {
-  const extras = {};
-  if (!pipePart) return extras;
-  for (const part of pipePart.split("|")) {
-    const idx = part.indexOf("=");
-    if (idx === -1) continue;
-    const key = part.substring(0, idx).trim();
-    const val = part.substring(idx + 1).trim();
-    if (key && val) extras[key] = val;
-  }
-  return extras;
+/* Extract hdntl token from the target URL and return it as a cookie value.
+   Some Akamai edges require it as a Cookie even when it's in the URL. */
+function hdntlFromUrl(target) {
+  const m = target.match(/[?&]hdntl=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
-// ─── BUILD UPSTREAM HEADERS ───────────────────────────────────
-function buildHeaders(urlStr, pipeExtras) {
-  let hostname = "";
-  try { hostname = new URL(urlStr).hostname; } catch {}
+/* ------------------------------------------------------------------ */
 
-  const base = getDomainHeaders(hostname);
-
-  // Auto-extract Akamai token → Cookie
-  const akamaiCookie = extractAkamaiCookie(urlStr);
-  if (akamaiCookie) {
-    const tokenKey = akamaiCookie.split("=")[0];
-    if (base["Cookie"]) {
-      if (!base["Cookie"].includes(tokenKey)) {
-        base["Cookie"] = `${base["Cookie"]}; ${akamaiCookie}`;
-      }
-    } else {
-      base["Cookie"] = akamaiCookie;
-    }
-    if (!pipeExtras["Cookie"]) {
-      pipeExtras["Cookie"] = base["Cookie"];
-    }
-  }
-
-  return { ...base, ...pipeExtras };
-}
-
-// ─── PROXIFY A URI ────────────────────────────────────────────
-function proxifyUri(uri, baseUrl, proxyOrigin, pipeExtras) {
-  if (!uri || uri.startsWith("data:")) return uri;
-  let absolute;
-  try { absolute = new URL(uri, baseUrl).toString(); } catch { return uri; }
-
-  const pipes = Object.entries(pipeExtras)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("|");
-
-  const full = pipes ? `${absolute}|${pipes}` : absolute;
-  return `${proxyOrigin}/api/proxy?u=${encodeURIComponent(full)}`;
-}
-
-// ─── REWRITE HLS ──────────────────────────────────────────────
-function rewriteM3U8(text, baseUrl, proxyOrigin, pipeExtras) {
-  return text
-    .split(/\r?\n/)
-    .map((line) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("#")) {
-        return line.replace(/URI="([^"]+)"/gi, (_, uri) =>
-          `URI="${proxifyUri(uri, baseUrl, proxyOrigin, pipeExtras)}"`
-        );
-      }
-      if (trimmed === "") return line;
-      return proxifyUri(trimmed, baseUrl, proxyOrigin, pipeExtras);
-    })
-    .join("\n");
-}
-
-// ─── REWRITE DASH ─────────────────────────────────────────────
-function rewriteMPD(text, baseUrl, proxyOrigin, pipeExtras) {
-  const rw = (url) => proxifyUri(url.trim(), baseUrl, proxyOrigin, pipeExtras);
-  return text
-    .replace(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/gi, (_, u) => `<BaseURL>${rw(u)}</BaseURL>`)
-    .replace(/\b(media|initialization)="([^"]+)"/gi, (_, a, u) => `${a}="${rw(u)}"`)
-    .replace(/xlink:href="([^"]+)"/gi, (_, u) => `xlink:href="${rw(u)}"`)
-    .replace(/\bsrc="([^"]+)"/gi, (_, u) => `src="${rw(u)}"`);
-}
-
-// ─── DETECT HLS ───────────────────────────────────────────────
-function isManifest(url, contentType) {
-  if (contentType?.toLowerCase().includes("mpegurl")) return true;
-  return /\.m3u8(\?|$)/i.test(url.split("?")[0]);
-}
-
-// ─── DETECT DASH ──────────────────────────────────────────────
-function isDash(url, contentType) {
-  if (contentType?.toLowerCase().includes("dash+xml")) return true;
-  return /\.mpd(\?|$)/i.test(url.split("?")[0]);
-}
-
-// ─── MAIN HANDLER ─────────────────────────────────────────────
 export async function onRequest(context) {
   const { request } = context;
   const reqUrl = new URL(request.url);
+  const selfOrigin = reqUrl.origin;
 
+  const matchedOrigin = matchOrigin(request, selfOrigin);
+
+  /* Preflight: only answer if the origin is allowed. Answering a preflight
+     from a disallowed origin would tell the browser the request is
+     permitted, defeating the check. */
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
+    if (!matchedOrigin) return new Response(null, { status: 403 });
+    return new Response(null, { headers: corsHeaders(matchedOrigin) });
   }
 
-  if (!["GET", "HEAD"].includes(request.method)) {
-    return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
+  /* Every endpoint requires a matched origin. A direct URL visit or a
+     bare curl produces neither Origin nor matching Referer and lands
+     here. */
+  if (!matchedOrigin) {
+    return new Response("Forbidden: origin not allowed", {
+      status: 403,
+      headers: { "Content-Type": "text/plain" },
+    });
   }
 
-  // ── Read raw ?u= ──────────────────────────────────────────────
-  const rawSearch = reqUrl.search.replace(/^\?/, "");
-  const uIdx = rawSearch.indexOf("u=");
-  if (uIdx === -1) {
-    return new Response(
-      JSON.stringify({ error: "Missing ?u= parameter" }),
-      { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
+  const CORS = corsHeaders(matchedOrigin);
+
+  /* Accept both ?url= and ?u= */
+  const target = reqUrl.searchParams.get("url") || reqUrl.searchParams.get("u");
+  if (!target) return new Response("Missing ?url=", { status: 400, headers: CORS });
+
+  let parsed;
+  try { parsed = new URL(target); } catch {
+    return new Response("Invalid ?url=", { status: 400, headers: CORS });
+  }
+  if (!hostAllowed(parsed.hostname)) {
+    return new Response("Host not allowed", { status: 403, headers: CORS });
   }
 
-  let rawU = rawSearch.substring(uIdx + 2);
-  try { rawU = decodeURIComponent(rawU); } catch {}
-
-  // ── Split + parse ─────────────────────────────────────────────
-  const { urlPart: targetRaw, pipePart } = splitRawU(rawU);
-  const pipeExtras = parsePipeHeaders(pipePart);
-  const upstreamHeaders = buildHeaders(targetRaw, pipeExtras);
-
-  // ── Validate ──────────────────────────────────────────────────
-  let targetUrl;
-  try { targetUrl = new URL(targetRaw); } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid target URL" }),
-      { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
-  }
-
-  if (!["http:", "https:"].includes(targetUrl.protocol)) {
-    return new Response(
-      JSON.stringify({ error: "Only http/https allowed" }),
-      { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
-  }
-
-  // ── Range header ──────────────────────────────────────────────
-  const range = request.headers.get("Range");
-  if (range) upstreamHeaders["Range"] = range;
-
-  // ── Fetch — residential proxy if needed ───────────────────────
-  let upstreamResp;
-  const hostname = targetUrl.hostname;
-
+  let upstream;
   try {
-    if (needsResidential(hostname)) {
-      // Try with residential proxy list
-      const proxies = await getProxyList();
-      let lastError = null;
-      let tried = 0;
-      const maxTries = Math.min(3, proxies.length);
+    upstream = await fetchWithRetry(target);
+  } catch (e) {
+    return new Response("Upstream failed: " + e.message, { status: 502, headers: CORS });
+  }
 
-      while (tried < maxTries) {
-        const proxy = pickProxy(proxies);
-        try {
-          upstreamResp = await fetchViaProxy(targetRaw, upstreamHeaders, proxy, request.method);
-          if (upstreamResp.ok || upstreamResp.status === 206) break;
-          lastError = `Proxy ${proxy} returned ${upstreamResp.status}`;
-        } catch (e) {
-          lastError = e.message;
-        }
-        tried++;
-      }
+  /* A refusal is not a playlist, whatever the path says. Rewriting an HTML
+     error page as one turns each of its lines into a proxy URL, and the
+     player ends up with a 200-looking manifest of nonsense. */
+  if (!upstream.ok) {
+    const body = await upstream.text();
+    const errHeaders = new Headers(CORS);
+    errHeaders.set("X-Proxy-Upstream", String(upstream.status));
+    errHeaders.set("Content-Type", "text/plain; charset=utf-8");
+    return new Response(body.slice(0, 2000), { status: upstream.status, headers: errHeaders });
+  }
 
-      // Final fallback: direct fetch
-      if (!upstreamResp || (!upstreamResp.ok && upstreamResp.status !== 206)) {
-        upstreamResp = await fetch(targetRaw, {
-          method: request.method,
-          headers: upstreamHeaders,
-          redirect: "follow",
-          cf: { cacheTtl: 0, cacheEverything: false },
+  const ct = upstream.headers.get("content-type") || "";
+  const lower = parsed.pathname.toLowerCase();
+  const isPlaylist = lower.endsWith(".m3u8") || ct.includes("mpegurl");
+
+  if (isPlaylist) {
+    const text = await upstream.text();
+    const base = new URL(target);
+    const wrapBase = `${selfOrigin}/api/proxy?url=`;
+
+    const rewritten = text.split("\n").map((rawLine) => {
+      const line = rawLine.trim();
+      if (line === "") return rawLine;
+
+      if (line.startsWith("#")) {
+        return line.replace(/URI="([^"]+)"/g, (_, uri) => {
+          const abs = new URL(uri, base).toString();
+          return `URI="${wrapBase}${encodeURIComponent(abs)}"`;
         });
       }
 
-    } else {
-      // Direct fetch for non-residential domains
-      upstreamResp = await fetch(targetRaw, {
-        method: request.method,
-        headers: upstreamHeaders,
-        redirect: "follow",
-        cf: { cacheTtl: 0, cacheEverything: false },
-      });
-    }
-  } catch (e) {
-    return new Response(
-      JSON.stringify({ error: `Fetch failed: ${e.message}` }),
-      { status: 502, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
+      const abs = new URL(line, base).toString();
+      return wrapBase + encodeURIComponent(abs);
+    }).join("\n");
+
+    const headers = new Headers(CORS);
+    headers.set("Content-Type", "application/vnd.apple.mpegurl");
+    headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    headers.set("CDN-Cache-Control", "no-store");
+    return new Response(rewritten, { status: 200, headers });
   }
 
-  if (!upstreamResp.ok && upstreamResp.status !== 206) {
-    return new Response(
-      JSON.stringify({ error: `Upstream returned ${upstreamResp.status}` }),
-      { status: upstreamResp.status, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-    );
-  }
+  /* Segment, key, or anything else: stream the bytes back. Piping the body
+     rather than buffering keeps segment size off the runtime's memory
+     ceiling. */
+  const headers = new Headers(CORS);
+  headers.set("Content-Type", ct || "video/mp2t");
+  headers.set("Cache-Control", upstream.headers.get("cache-control") || "public, max-age=30");
+  return new Response(upstream.body, { status: 200, headers });
+}
 
-  const contentType = upstreamResp.headers.get("Content-Type") || "";
+/* ============================================================
+   Fetch with retry — handles transient 403/429/5xx from Fancode
+   ============================================================ */
+async function fetchWithRetry(url, attempt = 1) {
+  const maxAttempts = 4;
 
-  // ── HLS ───────────────────────────────────────────────────────
-  if (isManifest(targetRaw, contentType)) {
-    const text = await upstreamResp.text();
-    const rewritten = rewriteM3U8(text, targetRaw, reqUrl.origin, pipeExtras);
-    return new Response(rewritten, {
-      status: 200,
-      headers: {
-        ...CORS_HEADERS,
-        "Content-Type": "application/vnd.apple.mpegurl",
-        "Cache-Control": "no-cache, no-store",
-      },
-    });
-  }
-
-  // ── DASH ──────────────────────────────────────────────────────
-  if (isDash(targetRaw, contentType)) {
-    const text = await upstreamResp.text();
-    const rewritten = rewriteMPD(text, targetRaw, reqUrl.origin, pipeExtras);
-    return new Response(rewritten, {
-      status: 200,
-      headers: {
-        ...CORS_HEADERS,
-        "Content-Type": "application/dash+xml",
-        "Cache-Control": "no-cache, no-store",
-      },
-    });
-  }
-
-  // ── Binary passthrough ────────────────────────────────────────
-  const passHeaders = {
-    ...CORS_HEADERS,
-    "Content-Type": contentType || "application/octet-stream",
-    "Cache-Control": "public, max-age=15",
+  /* Build upstream headers. The hdntl token lives inside the URL query
+     string, but some Akamai configurations ALSO require it as a Cookie.
+     Sending it both ways costs nothing and unblocks those edges. */
+  const upstreamHeaders = {
+    "Referer": REFERER,
+    "Origin": ORIGIN,
+    "User-Agent": UA,
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
   };
+  const hdntl = hdntlFromUrl(url);
+  if (hdntl) upstreamHeaders["Cookie"] = `hdntl=${hdntl}`;
 
-  const cl = upstreamResp.headers.get("Content-Length");
-  const cr = upstreamResp.headers.get("Content-Range");
-  const ar = upstreamResp.headers.get("Accept-Ranges");
-  if (cl) passHeaders["Content-Length"] = cl;
-  if (cr) passHeaders["Content-Range"] = cr;
-  if (ar) passHeaders["Accept-Ranges"] = ar;
+  try {
+    const res = await fetch(url, {
+      headers: upstreamHeaders,
+      redirect: "follow",
+    });
 
-  return new Response(upstreamResp.body, {
-    status: upstreamResp.status,
-    headers: passHeaders,
-  });
+    if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, 150 * attempt));
+      return fetchWithRetry(url, attempt + 1);
+    }
+    return res;
+  } catch (e) {
+    if (attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, 150 * attempt));
+      return fetchWithRetry(url, attempt + 1);
+    }
+    throw e;
+  }
 }
