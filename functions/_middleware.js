@@ -5,7 +5,7 @@ const ALLOWED_ORIGINS = [
   "https://sportlink-sonyliv.pages.dev",
 ];
 
-const SECRET_TOKEN = "CHANGE_THIS_TO_A_LONG_RANDOM_SECRET";
+const SECRET_TOKEN = "Sayan10";
 
 export async function onRequest(context) {
   const { request, next } = context;
