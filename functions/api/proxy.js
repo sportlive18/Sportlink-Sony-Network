@@ -1,5 +1,6 @@
 const ALLOWED_ORIGINS = [
-  "https://sportlink-cric.pages.dev",
+  "https://cric10.pages.dev",
+  "https://sl10.pages.dev",
   "https://sportlink10-ajp.pages.dev",
   "https://sportlink-sonyliv10.pages.dev",
   "https://sportlink-sonyliv.pages.dev",
