@@ -1,8 +1,8 @@
 const ALLOWED_ORIGINS = [
   "https://sportlink-cric.pages.dev",
   "https://sportlink10-ajp.pages.dev",
-  "https://sportlink-sonyliv10.pages.dev/",
-  "https://sportlink-sonyliv.pages.dev/",
+  "https://sportlink-sonyliv10.pages.dev",
+  "https://sportlink-sonyliv.pages.dev",
 ];
 
 const UPSTREAM_HEADERS = {
@@ -33,17 +33,14 @@ function rewriteManifest(text, baseUrl, proxyOrigin) {
   const lines = text.split(/\r?\n/);
   const out = lines.map((line) => {
     const trimmed = line.trim();
-
     if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP")) {
       return line.replace(/URI="([^"]+)"/, (_, uri) => {
         return `URI="${proxifyUri(uri, baseUrl, proxyOrigin)}"`;
       });
     }
-
     if (trimmed.startsWith("#") || trimmed === "") {
       return line;
     }
-
     return proxifyUri(trimmed, baseUrl, proxyOrigin);
   });
   return out.join("\n");
