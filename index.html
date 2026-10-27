@@ -378,6 +378,40 @@
       flex-shrink:0;
     }
 
+    /* ══ ROTATE FULLSCREEN BUTTON ══ */
+    .rotate-btn{
+      padding:6px 12px;
+      background:rgba(0,0,0,0.8);
+      border:1px solid rgba(255,255,255,0.1);
+      border-radius:10px;
+      color:#fff;
+      font-size:11px;
+      font-weight:500;
+      cursor:pointer;
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      backdrop-filter:blur(10px);
+      -webkit-backdrop-filter:blur(10px);
+      transition:all .25s;
+      font-family:inherit;
+      -webkit-tap-highlight-color:transparent;
+    }
+    .rotate-btn:hover{
+      background:rgba(239,68,68,0.2);
+      border-color:#ef4444;
+    }
+    .rotate-btn:active{transform:scale(.95)}
+    .rotate-btn.active{
+      background:rgba(239,68,68,0.3);
+      border-color:#ef4444;
+    }
+    .rotate-btn svg{
+      width:14px;
+      height:14px;
+      flex-shrink:0;
+    }
+
     /* Social pills — small, next to Back */
     .social-link{
       display:inline-flex;
@@ -447,6 +481,8 @@
       .player-toolbar{gap:4px}
       .back-btn{padding:5px 10px;font-size:10px}
       .back-btn svg{width:12px;height:12px}
+      .rotate-btn{padding:5px 10px;font-size:10px}
+      .rotate-btn svg{width:12px;height:12px}
       .social-link{padding:5px 8px;font-size:10px;gap:4px}
       .social-link svg{width:11px;height:11px}
       /* Slightly smaller badge, still prominent */
@@ -456,6 +492,8 @@
     @media (max-width:340px){
       .social-link span{display:none}
       .social-link{padding:5px 7px}
+      .rotate-btn span{display:none}
+      .rotate-btn{padding:5px 8px}
       #tgBadge span{display:none}
       #tgBadge{padding:9px 12px}
     }
@@ -604,13 +642,21 @@
 <!-- Status Toast -->
 <div id="status"></div>
 
-<!-- Player Top-Left Toolbar (Back + social links — shifted below badge) -->
+<!-- Player Top-Left Toolbar (Back + Rotate + social links — shifted below badge) -->
 <div class="player-toolbar" id="playerToolbar">
   <button class="back-btn" id="backBtn" type="button">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M19 12H5M12 19l-7-7 7-7"/>
     </svg>
     Back
+  </button>
+
+  <!-- ✅ ROTATE FULLSCREEN BUTTON -->
+  <button class="rotate-btn" id="rotateBtn" type="button" title="Rotate Fullscreen" aria-label="Rotate Fullscreen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+    </svg>
+    <span>Rotate</span>
   </button>
 
   <a href="https://t.me/sportlink10" target="_blank" rel="noopener" class="social-link tg-link" title="@Sportlink">
@@ -680,6 +726,7 @@ var $filter = document.getElementById("category-filter");
 var $playerContainer = document.getElementById("player-container");
 var $video = document.getElementById("player");
 var $backBtn = document.getElementById("backBtn");
+var $rotateBtn = document.getElementById("rotateBtn"); // ✅ NEW
 var $toolbar = document.getElementById("playerToolbar");
 var _stTmr = null;
 var allChannels = [];
@@ -872,6 +919,21 @@ function showPlayer(){
 }
 
 function hidePlayer(){
+  // ✅ Exit fullscreen + unlock orientation first
+  try {
+    var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl) {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(function(){});
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    }
+    if (screen.orientation && screen.orientation.unlock) {
+      try { screen.orientation.unlock(); } catch(e){}
+    }
+  } catch(e){}
+
   $list.style.display = "flex";
   $playerContainer.style.display = "none";
   $toolbar.classList.remove("show");
@@ -896,6 +958,64 @@ function hidePlayer(){
     window.history.pushState({}, document.title, window.location.pathname);
   }
 }
+
+// ============ ✅ ROTATE FULLSCREEN ============
+async function toggleRotateFullscreen(){
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+
+  // ── EXIT ──
+  if (fsEl) {
+    try {
+      if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+    } catch(e){}
+    try {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    } catch(e){}
+    return;
+  }
+
+  // ── ENTER (fullscreen on <html> so toolbar stays visible) ──
+  var enteredPageFs = false;
+  try {
+    var root = document.documentElement;
+    if (root.requestFullscreen) {
+      await root.requestFullscreen();
+      enteredPageFs = true;
+    } else if (root.webkitRequestFullscreen) {
+      root.webkitRequestFullscreen();
+      enteredPageFs = true;
+    } else if ($video.webkitEnterFullscreen) {
+      // iPhone Safari: native video fullscreen only (no orientation lock)
+      $video.webkitEnterFullscreen();
+      return;
+    }
+  } catch(e) {
+    console.warn("Fullscreen failed:", e);
+  }
+
+  // ── ORIENTATION LOCK (Android / Chrome / Desktop) ──
+  if (enteredPageFs) {
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        await screen.orientation.lock("landscape");
+      }
+    } catch(e) {
+      console.warn("Orientation lock not available:", e);
+    }
+  }
+}
+
+function syncRotateBtn(){
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if ($rotateBtn) $rotateBtn.classList.toggle("active", !!fsEl);
+}
+
+if ($rotateBtn) {
+  $rotateBtn.addEventListener("click", toggleRotateFullscreen);
+}
+document.addEventListener("fullscreenchange", syncRotateBtn);
+document.addEventListener("webkitfullscreenchange", syncRotateBtn);
 
 // ============ PLAYER SETUP ============
 function setupHLSPlayer(url){
