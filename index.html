@@ -332,6 +332,27 @@
       background:linear-gradient(135deg,#ef4444,#f97316)!important;
     }
 
+    /* ════════════════════════════════════════════
+       CSS-ROTATION FALLBACK
+       Applied when native orientation lock is unavailable
+       (iOS Safari, Android WebViews). Rotates the fixed
+       player container 90° so the video fills a portrait
+       screen in landscape orientation.
+       ════════════════════════════════════════════ */
+    #player-container.rotate-90{
+      position:fixed !important;
+      top:50% !important;
+      left:50% !important;
+      width:100vh !important;
+      height:100vw !important;
+      transform:translate(-50%,-50%) rotate(90deg) !important;
+      transform-origin:50% 50% !important;
+      z-index:9997 !important;
+    }
+    #player-container.rotate-90 video{
+      width:100%;height:100%;object-fit:contain;
+    }
+
     /* ══ PLAYER TOP-LEFT TOOLBAR (shifted below badge) ══ */
     .player-toolbar{
       position:fixed;
@@ -726,7 +747,7 @@ var $filter = document.getElementById("category-filter");
 var $playerContainer = document.getElementById("player-container");
 var $video = document.getElementById("player");
 var $backBtn = document.getElementById("backBtn");
-var $rotateBtn = document.getElementById("rotateBtn"); // ✅ NEW
+var $rotateBtn = document.getElementById("rotateBtn");
 var $toolbar = document.getElementById("playerToolbar");
 var _stTmr = null;
 var allChannels = [];
@@ -919,7 +940,7 @@ function showPlayer(){
 }
 
 function hidePlayer(){
-  // ✅ Exit fullscreen + unlock orientation first
+  // ✅ Exit fullscreen + unlock orientation + reset CSS rotation first
   try {
     var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl) {
@@ -929,9 +950,8 @@ function hidePlayer(){
         document.webkitExitFullscreen();
       }
     }
-    if (screen.orientation && screen.orientation.unlock) {
-      try { screen.orientation.unlock(); } catch(e){}
-    }
+    unlockOrientation();
+    applyCssRotation(false);
   } catch(e){}
 
   $list.style.display = "flex";
@@ -959,63 +979,112 @@ function hidePlayer(){
   }
 }
 
-// ============ ✅ ROTATE FULLSCREEN ============
+// ============ ✅ ROTATE FULLSCREEN (with CSS fallback) ============
+var cssRotated = false;
+
+function isPortrait(){ return window.innerHeight > window.innerWidth; }
+
+function applyCssRotation(on){
+  var el = $playerContainer;
+  if(!el) return;
+  el.classList.toggle("rotate-90", !!on);
+  cssRotated = !!on;
+  syncRotateBtn();
+}
+
+async function tryLockLandscape(){
+  var so = screen.orientation;
+  if(so && typeof so.lock === "function"){
+    for(var i=0;i<3;i++){
+      try { await so.lock("landscape"); return true; }
+      catch(e){ await new Promise(function(r){ setTimeout(r,150); }); }
+    }
+  }
+  var legacy = screen.lockOrientation || screen.mozLockOrientation || screen.msLockOrientation;
+  if(typeof legacy === "function"){
+    try { return legacy.call(screen,"landscape") !== false; }
+    catch(e){ return false; }
+  }
+  return false;
+}
+
+function unlockOrientation(){
+  try { if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch(e){}
+  try {
+    var legacy = screen.unlockOrientation || screen.mozUnlockOrientation || screen.msUnlockOrientation;
+    if(typeof legacy === "function") legacy.call(screen);
+  } catch(e){}
+}
+
 async function toggleRotateFullscreen(){
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  var isFauxFs = $playerContainer.style.display === "flex" && cssRotated;
 
-  // ── EXIT ──
-  if (fsEl) {
-    try {
-      if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
-    } catch(e){}
-    try {
-      if (document.exitFullscreen) await document.exitFullscreen();
-      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-    } catch(e){}
+  /* ── EXIT ── */
+  if (fsEl || isFauxFs) {
+    unlockOrientation();
+    applyCssRotation(false);
+    if (fsEl) {
+      try {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      } catch(e){}
+    }
+    syncRotateBtn();
     return;
   }
 
-  // ── ENTER (fullscreen on <html> so toolbar stays visible) ──
+  /* ── ENTER: page fullscreen (keeps toolbar + Plyr controls) ── */
   var enteredPageFs = false;
   try {
     var root = document.documentElement;
-    if (root.requestFullscreen) {
-      await root.requestFullscreen();
-      enteredPageFs = true;
-    } else if (root.webkitRequestFullscreen) {
-      root.webkitRequestFullscreen();
-      enteredPageFs = true;
-    } else if ($video.webkitEnterFullscreen) {
-      // iPhone Safari: native video fullscreen only (no orientation lock)
-      $video.webkitEnterFullscreen();
-      return;
-    }
-  } catch(e) {
-    console.warn("Fullscreen failed:", e);
-  }
+    if (root.requestFullscreen) { await root.requestFullscreen(); enteredPageFs = true; }
+    else if (root.webkitRequestFullscreen) { root.webkitRequestFullscreen(); enteredPageFs = true; }
+  } catch(e){ /* iOS & some WebViews reject this */ }
 
-  // ── ORIENTATION LOCK (Android / Chrome / Desktop) ──
-  if (enteredPageFs) {
-    try {
-      if (screen.orientation && screen.orientation.lock) {
-        await screen.orientation.lock("landscape");
-      }
-    } catch(e) {
-      console.warn("Orientation lock not available:", e);
-    }
+  /* ── Try native landscape lock ── */
+  var locked = false;
+  if (enteredPageFs) locked = await tryLockLandscape();
+
+  /* ── Fallback: rotate with CSS ── */
+  if (!locked) {
+    if (isPortrait()) applyCssRotation(true);
+    else applyCssRotation(false);
+    syncRotateBtn();
   }
 }
 
 function syncRotateBtn(){
+  if (!$rotateBtn) return;
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-  if ($rotateBtn) $rotateBtn.classList.toggle("active", !!fsEl);
+  $rotateBtn.classList.toggle("active", !!(fsEl || cssRotated));
+}
+
+/* Keep the CSS rotation correct if the user physically turns the phone */
+function handleViewportRotation(){
+  if (!cssRotated) return;
+  if (!isPortrait()) {
+    applyCssRotation(false);
+  }
+}
+window.addEventListener("resize", handleViewportRotation);
+if (screen.orientation && screen.orientation.addEventListener) {
+  screen.orientation.addEventListener("change", handleViewportRotation);
+} else {
+  window.addEventListener("orientationchange", function(){
+    setTimeout(handleViewportRotation, 250);
+  });
 }
 
 if ($rotateBtn) {
   $rotateBtn.addEventListener("click", toggleRotateFullscreen);
 }
-document.addEventListener("fullscreenchange", syncRotateBtn);
-document.addEventListener("webkitfullscreenchange", syncRotateBtn);
+document.addEventListener("fullscreenchange", function(){
+  if (!document.fullscreenElement && !cssRotated) syncRotateBtn();
+});
+document.addEventListener("webkitfullscreenchange", function(){
+  if (!document.webkitFullscreenElement && !cssRotated) syncRotateBtn();
+});
 
 // ============ PLAYER SETUP ============
 function setupHLSPlayer(url){
@@ -1083,6 +1152,16 @@ function setupHLSPlayer(url){
         }
       } : {}));
 
+      // Plyr's own fullscreen button also triggers rotation handling
+      currentPlayer.on("enterfullscreen", async function(){
+        var locked = await tryLockLandscape();
+        if(!locked && isPortrait()) applyCssRotation(true);
+      });
+      currentPlayer.on("exitfullscreen", function(){
+        unlockOrientation();
+        applyCssRotation(false);
+      });
+
       $video.play().catch(function(){});
       hideOverlay();
       toast("● Live", "ok", 3000);
@@ -1106,6 +1185,16 @@ function setupHLSPlayer(url){
     $video.addEventListener("loadedmetadata", function onMeta(){
       $video.removeEventListener("loadedmetadata", onMeta);
       currentPlayer = new Plyr($video, defaultOptions);
+
+      currentPlayer.on("enterfullscreen", async function(){
+        var locked = await tryLockLandscape();
+        if(!locked && isPortrait()) applyCssRotation(true);
+      });
+      currentPlayer.on("exitfullscreen", function(){
+        unlockOrientation();
+        applyCssRotation(false);
+      });
+
       $video.play().catch(function(){});
       hideOverlay();
       toast("● Live", "ok", 3000);
@@ -1116,6 +1205,16 @@ function setupHLSPlayer(url){
   } else {
     $video.src = playUrl;
     currentPlayer = new Plyr($video, defaultOptions);
+
+    currentPlayer.on("enterfullscreen", async function(){
+      var locked = await tryLockLandscape();
+      if(!locked && isPortrait()) applyCssRotation(true);
+    });
+    currentPlayer.on("exitfullscreen", function(){
+      unlockOrientation();
+      applyCssRotation(false);
+    });
+
     $video.addEventListener("loadedmetadata", function(){
       hideOverlay();
       toast("● Live", "ok", 3000);
